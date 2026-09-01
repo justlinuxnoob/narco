@@ -172,7 +172,26 @@ impl TorTransport {
     /// This is what makes "the session leaves nothing behind" true at the Tor
     /// layer as well as the app layer.
     pub async fn bootstrap(on_status: impl Fn(Status)) -> Result<Self, TorError> {
-        Self::bootstrap_in(None, on_status).await
+        // Use a directory this app owns, so a corrupt cache can be cleared.
+        // Arti does not recover from cache damage by itself — deleting the
+        // cache is the documented remedy (arti#783) — and with Arti's default
+        // shared location we would not know what is safe to delete.
+        let dir = app_tor_dir();
+        match Self::bootstrap_core(dir.as_deref(), None, &on_status).await {
+            Ok(t) => Ok(t),
+            Err(first) => {
+                // Retry once from a clean slate. A stale or partially written
+                // cache otherwise fails identically on every launch, which is
+                // indistinguishable from "the app is broken".
+                let Some(dir) = dir.as_deref() else {
+                    return Err(first);
+                };
+                if std::fs::remove_dir_all(dir).is_err() {
+                    return Err(first);
+                }
+                Self::bootstrap_core(Some(dir), None, &on_status).await
+            }
+        }
     }
 
     /// As [`Self::bootstrap`], but with an explicit directory for Tor's own
@@ -190,7 +209,7 @@ impl TorTransport {
         dir: Option<&std::path::Path>,
         on_status: impl Fn(Status),
     ) -> Result<Self, TorError> {
-        Self::bootstrap_core(dir, None, on_status).await
+        Self::bootstrap_core(dir, None, &on_status).await
     }
 
     /// As [`Self::bootstrap_in`], but route through **obfs4 bridges** — for
@@ -202,13 +221,13 @@ impl TorTransport {
         bridges: BridgeSettings,
         on_status: impl Fn(Status),
     ) -> Result<Self, TorError> {
-        Self::bootstrap_core(dir, Some(bridges), on_status).await
+        Self::bootstrap_core(dir, Some(bridges), &on_status).await
     }
 
     async fn bootstrap_core(
         dir: Option<&std::path::Path>,
         bridges: Option<BridgeSettings>,
-        on_status: impl Fn(Status),
+        on_status: &impl Fn(Status),
     ) -> Result<Self, TorError> {
         install_crypto_provider();
         on_status(Status::BootstrappingTor { percent: 0 });
@@ -221,6 +240,21 @@ impl TorTransport {
             .kind(tor_config::ExplicitOrAuto::Explicit(
                 tor_keymgr::config::ArtiKeystoreKind::Ephemeral,
             ));
+
+        // Don't let filesystem-permission checks block startup.
+        //
+        // Arti refuses to use its cache/state directory if `fs-mistrust`
+        // dislikes the permissions, and the failure surfaces as an unhelpful
+        // stall rather than a clear error (arti#783). Windows uses ACLs rather
+        // than Unix mode bits, so this check misfires there — matching a report
+        // where Tor connects ("15%: connecting successfully") and then the
+        // directory download never progresses.
+        //
+        // Safe here specifically: the keystore above is ephemeral and in-memory,
+        // so these directories hold only Tor's *public* directory data — no
+        // room code, onion key, or message ever touches them. There is nothing
+        // on disk for the permission check to protect.
+        builder.storage().permissions().dangerously_trust_everyone();
 
         if let Some(dir) = dir {
             builder
@@ -428,6 +462,25 @@ impl TorTransport {
             }
         }
     }
+}
+
+/// A cache/state directory owned by this app.
+///
+/// Arti's default location is shared with any other Arti-based program, so we
+/// could not safely clear it on corruption. Owning our own directory makes the
+/// wipe-and-retry in [`TorTransport::bootstrap`] safe. Holds only Tor's public
+/// directory data — never a room code, key, or message.
+fn app_tor_dir() -> Option<std::path::PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CACHE_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache"))
+            })
+    };
+    base.map(|b| b.join("narco").join("tor"))
 }
 
 /// Select the rustls crypto backend, once per process.
