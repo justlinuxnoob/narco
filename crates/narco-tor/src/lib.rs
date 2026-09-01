@@ -20,5 +20,5 @@ pub mod transport;
 pub mod wire;
 
 pub use identity::{identities, identity, OnionIdentity, Slot};
-pub use transport::{Meeting, Role, Status, TorError, TorTransport};
+pub use transport::{BridgeSettings, Meeting, Role, Status, TorError, TorTransport};
 pub use wire::{connect, ConnectError, Connected};

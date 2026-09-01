@@ -57,6 +57,53 @@ const VIRTUAL_PORT: u16 = 9001;
 /// the process. See the launch site for why reuse is a bug.
 static LAUNCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// How to reach Tor through obfs4 bridges on a censored network.
+#[derive(Clone, Debug)]
+pub struct BridgeSettings {
+    /// Absolute path to the `lyrebird` (obfs4) pluggable-transport binary.
+    /// The app bundles this and resolves the path at runtime.
+    pub lyrebird_path: std::path::PathBuf,
+    /// obfs4 bridge lines, e.g. `obfs4 1.2.3.4:443 <FINGERPRINT> cert=… iat-mode=0`.
+    /// Supplied by the app: built-in defaults and/or a line the user pasted
+    /// from <https://bridges.torproject.org>.
+    pub lines: Vec<String>,
+}
+
+/// Wire obfs4 bridges into the client config. Follows the arti-client 0.45
+/// documented pattern for `pt-client` exactly.
+fn configure_bridges(
+    builder: &mut arti_client::config::TorClientConfigBuilder,
+    bridges: &BridgeSettings,
+) -> Result<(), TorError> {
+    use arti_client::config::pt::TransportConfigBuilder;
+    use arti_client::config::{BridgeConfigBuilder, CfgPath};
+
+    if bridges.lines.is_empty() {
+        return Err(TorError::Config("no bridge lines provided".into()));
+    }
+
+    for line in &bridges.lines {
+        let bridge: BridgeConfigBuilder = line
+            .parse()
+            .map_err(|e| TorError::Config(format!("bad bridge line: {e}")))?;
+        builder.bridges().bridges().push(bridge);
+    }
+
+    // Point the obfs4 transport at the bundled lyrebird binary and launch it
+    // on startup so circuits can use it immediately.
+    let obfs4 = "obfs4"
+        .parse()
+        .map_err(|e| TorError::Config(format!("obfs4 protocol name: {e}")))?;
+    let mut transport = TransportConfigBuilder::default();
+    transport
+        .protocols(vec![obfs4])
+        .path(CfgPath::new_literal(bridges.lyrebird_path.clone()))
+        .run_on_startup(true);
+    builder.bridges().transports().push(transport);
+
+    Ok(())
+}
+
 /// How long to give one round before re-flipping the coin.
 ///
 /// Measured, not guessed: publishing an onion descriptor requires building
@@ -161,6 +208,26 @@ impl TorTransport {
         dir: Option<&std::path::Path>,
         on_status: impl Fn(Status),
     ) -> Result<Self, TorError> {
+        Self::bootstrap_core(dir, None, on_status).await
+    }
+
+    /// As [`Self::bootstrap_in`], but route through **obfs4 bridges** — for
+    /// networks that block Tor. Needs the path to a `lyrebird` pluggable-
+    /// transport binary and at least one bridge line. Slower than a direct
+    /// connection; only worth using when the direct path is censored.
+    pub async fn bootstrap_bridged(
+        dir: Option<&std::path::Path>,
+        bridges: BridgeSettings,
+        on_status: impl Fn(Status),
+    ) -> Result<Self, TorError> {
+        Self::bootstrap_core(dir, Some(bridges), on_status).await
+    }
+
+    async fn bootstrap_core(
+        dir: Option<&std::path::Path>,
+        bridges: Option<BridgeSettings>,
+        on_status: impl Fn(Status),
+    ) -> Result<Self, TorError> {
         install_crypto_provider();
         on_status(Status::BootstrappingTor { percent: 0 });
 
@@ -180,6 +247,10 @@ impl TorTransport {
             builder
                 .storage()
                 .cache_dir(arti_client::config::CfgPath::new_literal(dir.join("cache")));
+        }
+
+        if let Some(bridges) = &bridges {
+            configure_bridges(&mut builder, bridges)?;
         }
 
         let config = builder
