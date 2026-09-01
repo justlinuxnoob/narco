@@ -26,7 +26,12 @@ futures = "0.3"
 unsafe_code = "forbid"
 
 [profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
+opt-level = "s"
+# "thin" LTO and parallel codegen units cut release builds from ~12 minutes to a
+# few, for a binary a couple of hundred KB larger. With Tor pulling in 500+
+# crates, full LTO with codegen-units = 1 means optimising the whole graph as a
+# single non-parallel unit — a bad trade when the AppImage is already dominated
+# by the bundled webview runtime.
+lto = "thin"
+codegen-units = 16
 strip = true
