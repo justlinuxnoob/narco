@@ -14,9 +14,6 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 
-/// Kill the session after this long with no traffic in either direction.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
-
 /// Commands from the UI to the running session task.
 enum Cmd {
     Send(String),
@@ -26,8 +23,10 @@ enum Cmd {
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum UiEvent {
-    /// Progress during the slow connect.
-    Status { text: String },
+    /// Progress during the slow connect. `stage` drives the checklist in the
+    /// UI; a four-minute wait with no visible movement is indistinguishable
+    /// from a hang.
+    Status { text: String, stage: String },
     /// Handshake confirmed; the chat is live.
     Ready,
     /// A decrypted message from the peer.
@@ -46,14 +45,26 @@ fn emit(app: &AppHandle, e: UiEvent) {
     let _ = app.emit("narco", e);
 }
 
-fn status_text(s: Status) -> &'static str {
+/// Human text plus the stage id the UI checklist keys off.
+fn status_parts(s: Status) -> (&'static str, &'static str) {
     match s {
-        Status::BootstrappingTor => "Connecting to Tor…",
-        Status::PublishingService => "Publishing your address…",
-        Status::WaitingForPeer => "Waiting for the other person…",
-        Status::Retrying { .. } => "Retrying…",
-        Status::PeerFound => "Found them. Verifying…",
+        Status::BootstrappingTor => ("Joining the Tor network…", "tor"),
+        Status::PublishingService => ("Publishing your address…", "publish"),
+        Status::WaitingForPeer => ("Waiting for the other person…", "peer"),
+        Status::Retrying { .. } => ("Still waiting…", "peer"),
+        Status::PeerFound => ("Found them. Verifying it's really them…", "verify"),
     }
+}
+
+fn emit_status(app: &AppHandle, s: Status) {
+    let (text, stage) = status_parts(s);
+    emit(
+        app,
+        UiEvent::Status {
+            text: text.into(),
+            stage: stage.into(),
+        },
+    );
 }
 
 /// Generate a fresh 130-bit code.
@@ -75,6 +86,7 @@ async fn connect(
     app: AppHandle,
     state: State<'_, AppState>,
     secrets: Vec<String>,
+    idle_secs: u64,
 ) -> Result<(), String> {
     // Validate before doing anything slow.
     let derived = narco_proto::derive_multi(&secrets).map_err(|e| e.to_string())?;
@@ -89,7 +101,7 @@ async fn connect(
     }
 
     tauri::async_runtime::spawn(async move {
-        let reason = run_session(&app, derived, rx).await;
+        let reason = run_session(&app, derived, rx, idle_secs).await;
         // Whatever happened, the session is over and holds nothing.
         if let Some(state) = app.try_state::<AppState>() {
             *state.tx.lock().expect("state poisoned") = None;
@@ -108,15 +120,18 @@ async fn run_session(
     app: &AppHandle,
     derived: narco_proto::Derived,
     mut rx: mpsc::Receiver<Cmd>,
+    idle_secs: u64,
 ) -> String {
+    // 0 means the user chose "never". Represent it as an effectively unreachable
+    // deadline rather than branching the select! arm.
+    let idle = if idle_secs == 0 {
+        Duration::from_secs(u32::MAX as u64)
+    } else {
+        Duration::from_secs(idle_secs)
+    };
     let app_status = app.clone();
     let transport = match TorTransport::bootstrap(move |s| {
-        emit(
-            &app_status,
-            UiEvent::Status {
-                text: status_text(s).into(),
-            },
-        );
+        emit_status(&app_status, s);
     })
     .await
     {
@@ -126,12 +141,7 @@ async fn run_session(
 
     let app_status = app.clone();
     let connected = narco_tor::connect(&transport, &derived, move |s| {
-        emit(
-            &app_status,
-            UiEvent::Status {
-                text: status_text(s).into(),
-            },
-        );
+        emit_status(&app_status, s);
     })
     .await;
 
@@ -179,7 +189,13 @@ async fn run_session(
                                 }
                             }
                             Err(ProtoError::TooLong) => {
-                                emit(app, UiEvent::Status { text: "Message too long.".into() });
+                                emit(
+                                    app,
+                                    UiEvent::Status {
+                                        text: "Message too long.".into(),
+                                        stage: "verify".into(),
+                                    },
+                                );
                             }
                             Err(e) => return e.to_string(),
                         }
@@ -190,8 +206,11 @@ async fn run_session(
             }
 
             // Idle reaper.
-            _ = tokio::time::sleep(IDLE_TIMEOUT) => {
-                return "Session ended after 10 minutes of silence.".into();
+            _ = tokio::time::sleep(idle) => {
+                return format!(
+                    "Session ended after {} minutes of silence.",
+                    idle.as_secs() / 60
+                );
             }
         }
     }

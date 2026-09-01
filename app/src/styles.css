@@ -261,3 +261,131 @@ button.small {
     }
   }
 }
+
+/* --- per-secret actions -------------------------------------------------- */
+
+button.icon {
+  padding: 7px 9px;
+  font-size: 11px;
+  background: var(--paper);
+  color: var(--muted);
+  border-color: var(--line);
+  letter-spacing: 0.04em;
+}
+
+button.icon:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--ink);
+  opacity: 1;
+}
+
+/* --- settings ------------------------------------------------------------ */
+
+#settings summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12.5px;
+  letter-spacing: 0.06em;
+  padding: 4px 0;
+}
+
+#settings[open] summary {
+  color: var(--ink);
+  margin-bottom: 10px;
+}
+
+.setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+  margin-bottom: 8px;
+}
+
+.setting select {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+/* --- connection progress ------------------------------------------------- */
+
+#stages {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 6px 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+#stages li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* The mark carries the state, so it reads correctly in greyscale and to
+   screen readers via the surrounding text. */
+.mark {
+  width: 13px;
+  height: 13px;
+  border: 1px solid var(--muted);
+  border-radius: 50%;
+  flex: none;
+  position: relative;
+}
+
+#stages li.done {
+  color: var(--ink);
+}
+
+#stages li.done .mark {
+  background: var(--ink);
+  border-color: var(--ink);
+}
+
+#stages li.done .mark::after {
+  content: "";
+  position: absolute;
+  left: 3.5px;
+  top: 1px;
+  width: 3px;
+  height: 6px;
+  border: solid var(--paper);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+#stages li.active {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+#stages li.active .mark {
+  border-color: var(--ink);
+  border-width: 2px;
+}
+
+.elapsed {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.elapsed span {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  #stages li.active .mark {
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+}

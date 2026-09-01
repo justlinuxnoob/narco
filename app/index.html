@@ -10,19 +10,45 @@
     <!-- Entry -->
     <main id="entry" class="screen">
       <h1>narco</h1>
-      <p class="sub">Both people enter the same secrets.</p>
+      <p class="sub">Both people enter the same secrets, in the same order.</p>
 
       <div id="secrets"></div>
 
-      <button id="add" class="ghost" type="button">+ add another secret</button>
+      <button id="add" class="ghost small" type="button">+ add another secret</button>
 
-      <p class="hint" id="hint">
+      <p class="hint">
         Send each secret a different way — one messaged, one spoken aloud.
         Someone who intercepts only one learns nothing.
       </p>
 
+      <details id="settings">
+        <summary>settings</summary>
+        <label class="setting">
+          <span>end chat after silence</span>
+          <select id="idle">
+            <option value="300">5 minutes</option>
+            <option value="600" selected>10 minutes</option>
+            <option value="1800">30 minutes</option>
+            <option value="3600">1 hour</option>
+            <option value="0">never</option>
+          </select>
+        </label>
+        <label class="setting">
+          <span>messages vanish after</span>
+          <select id="burn">
+            <option value="0" selected>off</option>
+            <option value="30">30 seconds</option>
+            <option value="60">1 minute</option>
+            <option value="300">5 minutes</option>
+          </select>
+        </label>
+        <p class="hint">
+          Nothing is ever written to disk. These only change how long things
+          stay in memory and on screen.
+        </p>
+      </details>
+
       <div class="row">
-        <button id="generate" class="ghost" type="button">generate</button>
         <button id="start" type="button">start</button>
       </div>
 
@@ -32,19 +58,37 @@
     <!-- Connecting -->
     <main id="connecting" class="screen hidden">
       <h1>narco</h1>
-      <p class="status" id="status">Connecting…</p>
-      <p class="hint">
-        This takes a few minutes. Narco has no server, so the two apps have to
-        find each other through the Tor network.
+
+      <ol id="stages">
+        <li data-stage="tor"><span class="mark"></span>Joining the Tor network</li>
+        <li data-stage="publish"><span class="mark"></span>Publishing your address</li>
+        <li data-stage="peer"><span class="mark"></span>Waiting for the other person</li>
+        <li data-stage="verify"><span class="mark"></span>Verifying it's really them</li>
+      </ol>
+
+      <p class="status" id="status">Starting…</p>
+      <p class="elapsed"><span id="elapsed">0:00</span> elapsed</p>
+
+      <p class="hint" id="patience">
+        This usually takes <strong>3–5 minutes</strong>, and it is not stuck.
+        Narco has no server, so both apps have to find each other through the
+        Tor network first. Later connections are quicker.
       </p>
-      <button id="cancel" class="ghost" type="button">cancel</button>
+
+      <p class="hint" id="both-open">
+        The other person needs the app open with the same secrets.
+      </p>
+
+      <div class="row">
+        <button id="cancel" class="ghost" type="button">cancel</button>
+      </div>
     </main>
 
     <!-- Chat -->
     <main id="chat" class="screen hidden">
       <header>
         <span class="dot" aria-hidden="true"></span>
-        <span class="live">encrypted</span>
+        <span class="live" id="chat-mode">encrypted</span>
         <button id="end" class="ghost small" type="button">end</button>
       </header>
       <ol id="messages" aria-live="polite"></ol>
@@ -67,10 +111,12 @@
       <h1>gone</h1>
       <p class="status" id="ended-reason"></p>
       <p class="hint">
-        The keys were destroyed and the messages are gone. Nothing was written to
-        disk and nothing was stored anywhere.
+        The keys were destroyed and the messages are gone. Nothing was written
+        to disk and nothing was stored anywhere.
       </p>
-      <button id="again" type="button">start over</button>
+      <div class="row">
+        <button id="again" type="button">start over</button>
+      </div>
     </main>
 
     <script type="module" src="/src/main.ts"></script>
