@@ -14,7 +14,8 @@ type UiEvent =
   | { kind: "status"; text: string; stage: string }
   | { kind: "ready" }
   | { kind: "message"; text: string }
-  | { kind: "ended"; reason: string };
+  | { kind: "ended"; reason: string }
+  | { kind: "torProgress"; text: string; ready: boolean };
 
 const $ = <T extends HTMLElement>(id: string) => {
   const el = document.getElementById(id);
@@ -131,6 +132,11 @@ function addSecret(focus = false) {
 
 addSecret();
 $("add").addEventListener("click", () => addSecret(true));
+
+// Join Tor immediately, without waiting for secrets — it needs none. This hides
+// the slowest stage behind the time spent typing and sharing a code, and the
+// client stays alive so a second chat skips it entirely.
+invoke("warm_tor").catch(() => {});
 
 // --- connecting progress --------------------------------------------------
 
@@ -301,5 +307,12 @@ listen<UiEvent>("narco", ({ payload }) => {
     case "ended":
       endWith(payload.reason);
       break;
+    case "torProgress": {
+      $("tor-state").textContent = payload.ready ? "tor ready" : payload.text;
+      $("tor-state").classList.toggle("ready", payload.ready);
+      // Already connected to Tor, so skip straight to the publishing stage.
+      if (payload.ready) setStage("publish");
+      break;
+    }
   }
 });

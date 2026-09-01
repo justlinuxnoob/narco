@@ -48,6 +48,21 @@ jobs:
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
             patchelf libgtk-3-dev build-essential curl wget file libssl-dev
 
+      # The bundler names files from tauri.conf.json, so without this the
+      # artifacts carry a stale version and look like an old build.
+      - name: Set version from tag
+        shell: bash
+        run: |
+          V="${{ github.event.inputs.tag || github.ref_name }}"
+          V="${V#v}"
+          node -e "
+            const f='app/src-tauri/tauri.conf.json';
+            const j=JSON.parse(require('fs').readFileSync(f,'utf8'));
+            j.version='$V';
+            require('fs').writeFileSync(f, JSON.stringify(j,null,2)+'\n');
+            console.log('version set to', j.version);
+          "
+
       - name: Install frontend
         working-directory: app
         run: npm ci

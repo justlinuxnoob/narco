@@ -9,7 +9,7 @@ use narco_proto::{Error as ProtoError, Event};
 use narco_tor::wire::{recv_frame, send_frame, Connected};
 use narco_tor::{Status, TorTransport};
 use serde::Serialize;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
@@ -33,12 +33,21 @@ enum UiEvent {
     Message { text: String },
     /// Session over. `reason` is shown to the user.
     Ended { reason: String },
+    /// Progress joining Tor, reported while the user is still typing.
+    TorProgress { text: String, ready: bool },
 }
 
 #[derive(Default)]
 struct AppState {
     /// `Some` while a session is running.
     tx: Mutex<Option<mpsc::Sender<Cmd>>>,
+    /// The Tor client, bootstrapped once at launch and reused for every chat.
+    ///
+    /// Bootstrapping needs no secrets, so it runs while the user is still
+    /// typing and sharing a code — hiding the slowest stage behind time they
+    /// were spending anyway. Keeping it alive afterwards means a second
+    /// conversation skips the stage entirely.
+    tor: Arc<tokio::sync::OnceCell<Arc<TorTransport>>>,
 }
 
 fn emit(app: &AppHandle, e: UiEvent) {
@@ -75,6 +84,46 @@ fn emit_status(app: &AppHandle, s: Status) {
     );
 }
 
+/// Bootstrap Tor once, or return the already-bootstrapped client.
+///
+/// Safe to call concurrently: `OnceCell` guarantees one bootstrap, and later
+/// callers await that same one.
+async fn ensure_tor(
+    app: &AppHandle,
+    cell: &tokio::sync::OnceCell<Arc<TorTransport>>,
+) -> Result<Arc<TorTransport>, String> {
+    let out = cell
+        .get_or_try_init(|| async {
+            let a = app.clone();
+            TorTransport::bootstrap(move |s| {
+                let (text, _) = status_parts(s);
+                emit(&a, UiEvent::TorProgress { text, ready: false });
+            })
+            .await
+            .map(Arc::new)
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .cloned()?;
+    emit(
+        app,
+        UiEvent::TorProgress {
+            text: "Tor ready".into(),
+            ready: true,
+        },
+    );
+    Ok(out)
+}
+
+/// Start joining Tor without waiting for it. Called at launch.
+#[tauri::command]
+fn warm_tor(app: AppHandle, state: State<'_, AppState>) {
+    let cell = state.tor.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = ensure_tor(&app, &cell).await;
+    });
+}
+
 /// Generate a fresh 130-bit code.
 #[tauri::command]
 fn generate_code() -> String {
@@ -108,11 +157,12 @@ async fn connect(
         *slot = Some(tx);
     }
 
+    let tor = state.tor.clone();
     tauri::async_runtime::spawn(async move {
         // Catch panics so a bug can never leave the UI waiting forever with no
         // explanation. Every path out of here emits an Ended event.
         let reason = match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-            run_session(&app, derived, rx, idle_secs),
+            run_session(&app, derived, rx, idle_secs, tor),
         ))
         .await
         {
@@ -140,6 +190,7 @@ async fn run_session(
     derived: narco_proto::Derived,
     mut rx: mpsc::Receiver<Cmd>,
     idle_secs: u64,
+    tor: Arc<tokio::sync::OnceCell<Arc<TorTransport>>>,
 ) -> String {
     // 0 means the user chose "never". Represent it as an effectively unreachable
     // deadline rather than branching the select! arm.
@@ -148,18 +199,14 @@ async fn run_session(
     } else {
         Duration::from_secs(idle_secs)
     };
-    let app_status = app.clone();
-    let transport = match TorTransport::bootstrap(move |s| {
-        emit_status(&app_status, s);
-    })
-    .await
-    {
+    // Usually already done: the client was bootstrapped at launch.
+    let transport = match ensure_tor(app, &tor).await {
         Ok(t) => t,
-        Err(e) => return e.to_string(),
+        Err(e) => return e,
     };
 
     let app_status = app.clone();
-    let connected = narco_tor::connect(&transport, &derived, move |s| {
+    let connected = narco_tor::connect(transport.as_ref(), &derived, move |s| {
         emit_status(&app_status, s);
     })
     .await;
@@ -258,6 +305,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             generate_code,
             check_code,
+            warm_tor,
             connect,
             send,
             end_session
