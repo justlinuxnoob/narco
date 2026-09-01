@@ -46,13 +46,21 @@ fn emit(app: &AppHandle, e: UiEvent) {
 }
 
 /// Human text plus the stage id the UI checklist keys off.
-fn status_parts(s: Status) -> (&'static str, &'static str) {
+fn status_parts(s: Status) -> (String, &'static str) {
     match s {
-        Status::BootstrappingTor => ("Joining the Tor network…", "tor"),
-        Status::PublishingService => ("Publishing your address…", "publish"),
-        Status::WaitingForPeer => ("Waiting for the other person…", "peer"),
-        Status::Retrying { .. } => ("Still waiting…", "peer"),
-        Status::PeerFound => ("Found them. Verifying it's really them…", "verify"),
+        // Bootstrap downloads Tor's relay directory, so show real progress
+        // rather than a spinner that cannot be told apart from a hang.
+        Status::BootstrappingTor { percent } => {
+            (format!("Joining the Tor network… {percent}%"), "tor")
+        }
+        Status::TorBlocked { detail } => (
+            format!("Tor seems blocked on this network ({detail}). Still trying…"),
+            "tor",
+        ),
+        Status::PublishingService => ("Publishing your address…".into(), "publish"),
+        Status::WaitingForPeer => ("Waiting for the other person…".into(), "peer"),
+        Status::Retrying { .. } => ("Still waiting…".into(), "peer"),
+        Status::PeerFound => ("Found them. Verifying it's really them…".into(), "verify"),
     }
 }
 
@@ -61,7 +69,7 @@ fn emit_status(app: &AppHandle, s: Status) {
     emit(
         app,
         UiEvent::Status {
-            text: text.into(),
+            text,
             stage: stage.into(),
         },
     );

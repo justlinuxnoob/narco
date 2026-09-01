@@ -78,10 +78,18 @@ pub enum Role {
 }
 
 /// Coarse progress, for a UI that must explain a 30-90 second wait.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Status {
-    /// Connecting to the Tor network. The slowest step, and only on first run.
-    BootstrappingTor,
+    /// Connecting to the Tor network. The slowest and most variable step.
+    ///
+    /// Carries real progress, because this stage downloads Tor's consensus —
+    /// the signed, hourly-updated list of every relay. That cannot be shipped
+    /// in the binary (it expires, and a stale one is rejected), so on a first
+    /// run it is a genuine multi-megabyte download. A bare spinner here is
+    /// indistinguishable from a hang.
+    BootstrappingTor { percent: u8 },
+    /// Tor appears to be blocked or unreachable on this network.
+    TorBlocked { detail: String },
     /// Connected to Tor; publishing our address.
     PublishingService,
     /// Published; waiting for the other person.
@@ -145,7 +153,7 @@ impl TorTransport {
         on_status: impl Fn(Status),
     ) -> Result<Self, TorError> {
         install_crypto_provider();
-        on_status(Status::BootstrappingTor);
+        on_status(Status::BootstrappingTor { percent: 0 });
 
         let mut builder = TorClientConfig::builder();
         builder
