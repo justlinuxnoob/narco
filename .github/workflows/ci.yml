@@ -40,10 +40,19 @@ jobs:
 
       # The relay must never gain a dependency on the protocol crate: it holds
       # no keys, and "it cannot decrypt" should stay checkable from the manifest.
+      #
+      # Uses cargo metadata rather than grep. Grepping the manifest matches the
+      # comment that documents this very rule, which is a false positive, and it
+      # would also miss a dependency introduced under an alias or a target-
+      # specific table.
       - name: Relay stays blind
         run: |
-          if grep -q 'narco-proto' server/Cargo.toml; then
-            echo "::error::server/ must not depend on narco-proto"
+          deps=$(cargo metadata --manifest-path server/Cargo.toml \
+                   --format-version 1 --no-deps \
+                 | jq -r '.packages[0].dependencies[].name')
+          echo "relay dependencies: $(echo "$deps" | tr '\n' ' ')"
+          if echo "$deps" | grep -qx 'narco-proto'; then
+            echo "::error::server/ must not depend on narco-proto — the relay holds no keys"
             exit 1
           fi
 
