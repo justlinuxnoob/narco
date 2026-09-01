@@ -84,7 +84,11 @@ fn from_seed(seed: &[u8; 32], slot: Slot) -> OnionIdentity {
         .id()
         .display_unredacted()
         .to_string();
-    OnionIdentity { address, slot, keypair }
+    OnionIdentity {
+        address,
+        slot,
+        keypair,
+    }
 }
 
 /// Derive both onion identities for a room.

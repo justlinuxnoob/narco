@@ -98,8 +98,8 @@ pub fn derive_multi<S: AsRef<str>>(raw_secrets: &[S]) -> Result<Derived> {
     let first = secrets.first().ok_or(Error::CodeTooShort)?;
     code::validate(first)?;
 
-    let params = Params::new(ARGON_MEM_KIB, ARGON_TIME, ARGON_LANES, Some(64))
-        .map_err(|_| Error::Kdf)?;
+    let params =
+        Params::new(ARGON_MEM_KIB, ARGON_TIME, ARGON_LANES, Some(64)).map_err(|_| Error::Kdf)?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
     // Each secret is length-prefixed so the sequence cannot be re-split
@@ -121,26 +121,37 @@ pub fn derive_multi<S: AsRef<str>>(raw_secrets: &[S]) -> Result<Derived> {
     let hk = Hkdf::<Sha256>::new(None, ikm.as_ref());
 
     let mut room_raw = Zeroizing::new([0u8; 16]);
-    hk.expand(INFO_ROOM_ID, room_raw.as_mut()).map_err(|_| Error::Kdf)?;
+    hk.expand(INFO_ROOM_ID, room_raw.as_mut())
+        .map_err(|_| Error::Kdf)?;
 
     let mut pake_pw = Zeroizing::new([0u8; 32]);
-    hk.expand(INFO_PAKE_PW, pake_pw.as_mut()).map_err(|_| Error::Kdf)?;
+    hk.expand(INFO_PAKE_PW, pake_pw.as_mut())
+        .map_err(|_| Error::Kdf)?;
 
     let mut onion_seed_a = Zeroizing::new([0u8; 32]);
-    hk.expand(INFO_ONION_A, onion_seed_a.as_mut()).map_err(|_| Error::Kdf)?;
+    hk.expand(INFO_ONION_A, onion_seed_a.as_mut())
+        .map_err(|_| Error::Kdf)?;
 
     let mut onion_seed_b = Zeroizing::new([0u8; 32]);
-    hk.expand(INFO_ONION_B, onion_seed_b.as_mut()).map_err(|_| Error::Kdf)?;
+    hk.expand(INFO_ONION_B, onion_seed_b.as_mut())
+        .map_err(|_| Error::Kdf)?;
 
     let room_id = room_raw.iter().map(|b| format!("{b:02x}")).collect();
 
-    Ok(Derived { room_id, pake_pw, onion_seed_a, onion_seed_b })
+    Ok(Derived {
+        room_id,
+        pake_pw,
+        onion_seed_a,
+        onion_seed_b,
+    })
 }
 
 /// True if `s` is exactly 32 lowercase hex characters. Used by both the client
 /// and the relay to reject malformed room identifiers.
 pub fn is_valid_room_id(s: &str) -> bool {
-    s.len() == 32 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 32
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[cfg(test)]
@@ -182,7 +193,10 @@ mod tests {
     #[test]
     fn invalid_codes_are_rejected_before_any_derivation() {
         assert_eq!(derive("short").unwrap_err(), Error::CodeTooShort);
-        assert_eq!(derive("aaaaaaaaaaaa").unwrap_err(), Error::CodeTooRepetitive);
+        assert_eq!(
+            derive("aaaaaaaaaaaa").unwrap_err(),
+            Error::CodeTooRepetitive
+        );
     }
 
     #[test]
@@ -221,8 +235,17 @@ mod tests {
 
     #[test]
     fn any_number_of_secrets_works_and_is_deterministic() {
-        let s = ["some-decent-code-42", "spoken aloud", "written down", "4", "5"];
-        assert_eq!(derive_multi(&s).unwrap().room_id, derive_multi(&s).unwrap().room_id);
+        let s = [
+            "some-decent-code-42",
+            "spoken aloud",
+            "written down",
+            "4",
+            "5",
+        ];
+        assert_eq!(
+            derive_multi(&s).unwrap().room_id,
+            derive_multi(&s).unwrap().room_id
+        );
         // Each additional secret lands the pair somewhere else entirely.
         let mut seen = std::collections::HashSet::new();
         for n in 1..=s.len() {
@@ -249,7 +272,10 @@ mod tests {
 
     #[test]
     fn the_first_secret_must_still_be_a_valid_code() {
-        assert_eq!(derive_multi(&["short", "padding"]).unwrap_err(), Error::CodeTooShort);
+        assert_eq!(
+            derive_multi(&["short", "padding"]).unwrap_err(),
+            Error::CodeTooShort
+        );
         let empty: [&str; 0] = [];
         assert_eq!(derive_multi(&empty).unwrap_err(), Error::CodeTooShort);
         // Extra secrets are free-form; only the first is constrained.

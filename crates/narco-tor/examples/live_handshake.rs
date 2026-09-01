@@ -13,8 +13,8 @@
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use narco_proto::Event;
-use narco_tor::{Status, TorTransport};
 use narco_tor::wire::{recv_frame, send_frame, Connected};
+use narco_tor::{Status, TorTransport};
 use std::time::Instant;
 
 const CODE: &str = "PWXK7M2QRT9HFZ";

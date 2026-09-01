@@ -116,7 +116,11 @@ mod tests {
         for len in [0usize, 1, 251, 252, 253, 1019, 1020, 4000, 16000, 32768] {
             let pt = vec![0xABu8; len];
             let padded = pad(&pt).unwrap();
-            assert!(BUCKETS.contains(&padded.len()), "len {len} → {}", padded.len());
+            assert!(
+                BUCKETS.contains(&padded.len()),
+                "len {len} → {}",
+                padded.len()
+            );
             assert_eq!(unpad(&padded).unwrap(), pt, "round trip failed at {len}");
         }
     }
@@ -128,7 +132,10 @@ mod tests {
 
     #[test]
     fn pad_rejects_oversize() {
-        assert_eq!(pad(&vec![0u8; MAX_PLAINTEXT + 1]).unwrap_err(), Error::TooLong);
+        assert_eq!(
+            pad(&vec![0u8; MAX_PLAINTEXT + 1]).unwrap_err(),
+            Error::TooLong
+        );
     }
 
     #[test]
@@ -177,7 +184,10 @@ mod tests {
         assert_eq!(parse(&[KIND_PAKE, 1, 2]).unwrap_err(), Error::BadFrame);
         assert_eq!(parse(&[KIND_CONFIRM]).unwrap_err(), Error::BadFrame);
         // KIND_MSG with a counter but no ciphertext.
-        assert_eq!(parse(&[KIND_MSG, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap_err(), Error::BadFrame);
+        assert_eq!(
+            parse(&[KIND_MSG, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap_err(),
+            Error::BadFrame
+        );
         assert_eq!(parse(&[0xFF, 1]).unwrap_err(), Error::UnknownKind(0xFF));
     }
 }

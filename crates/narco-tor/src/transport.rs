@@ -165,7 +165,9 @@ impl TorTransport {
                 .cache_dir(arti_client::config::CfgPath::new_literal(dir.join("cache")));
         }
 
-        let config = builder.build().map_err(|e| TorError::Config(e.to_string()))?;
+        let config = builder
+            .build()
+            .map_err(|e| TorError::Config(e.to_string()))?;
         let client = TorClient::create_bootstrapped(config)
             .await
             .map_err(|e| TorError::Bootstrap(e.to_string()))?;
@@ -186,7 +188,10 @@ impl TorTransport {
             if round > 0 {
                 on_status(Status::Retrying { round });
             }
-            match self.meet_once(derived, random_role(), round, &on_status).await? {
+            match self
+                .meet_once(derived, random_role(), round, &on_status)
+                .await?
+            {
                 Some(stream) => {
                     on_status(Status::PeerFound);
                     return Ok(stream);
@@ -275,7 +280,10 @@ impl TorTransport {
         });
 
         on_status(Status::WaitingForPeer);
-        Ok(Meeting { service, candidates })
+        Ok(Meeting {
+            service,
+            candidates,
+        })
     }
 
     /// One round in a chosen role. `Ok(None)` means the round timed out, which

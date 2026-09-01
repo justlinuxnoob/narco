@@ -126,8 +126,10 @@ pub async fn connect(
     derived: &Derived,
     on_status: impl Fn(Status),
 ) -> Result<Connected<arti_client::DataStream>, ConnectError> {
-    let Meeting { service, mut candidates } =
-        transport.meet_candidates(derived, &on_status).await?;
+    let Meeting {
+        service,
+        mut candidates,
+    } = transport.meet_candidates(derived, &on_status).await?;
 
     let deadline = tokio::time::Instant::now() + MEET_TIMEOUT;
 
@@ -137,11 +139,8 @@ pub async fn connect(
             return Err(ConnectError::TimedOut);
         };
 
-        let attempt = tokio::time::timeout(
-            CANDIDATE_TIMEOUT,
-            try_candidate(&mut stream, derived),
-        )
-        .await;
+        let attempt =
+            tokio::time::timeout(CANDIDATE_TIMEOUT, try_candidate(&mut stream, derived)).await;
 
         if let Ok(Ok(Some(session))) = attempt {
             on_status(Status::PeerFound);

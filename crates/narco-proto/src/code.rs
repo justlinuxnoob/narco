@@ -43,7 +43,10 @@ const WEAK_LIST: &[&str] = &[
 pub fn generate() -> String {
     let mut buf = [0u8; GENERATED_LEN];
     getrandom::fill(&mut buf).expect("OS CSPRNG unavailable");
-    let s: String = buf.iter().map(|b| ALPHABET[(b & 31) as usize] as char).collect();
+    let s: String = buf
+        .iter()
+        .map(|b| ALPHABET[(b & 31) as usize] as char)
+        .collect();
     // The raw entropy is no longer needed; the string is the only live copy.
     zeroize::Zeroize::zeroize(&mut buf);
     s
@@ -93,9 +96,7 @@ fn is_monotonic_run(chars: &[char]) -> bool {
     if step != 1 && step != -1 {
         return false;
     }
-    chars
-        .windows(2)
-        .all(|w| w[1] as i64 - w[0] as i64 == step)
+    chars.windows(2).all(|w| w[1] as i64 - w[0] as i64 == step)
 }
 
 #[cfg(test)]

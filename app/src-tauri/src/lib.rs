@@ -71,7 +71,11 @@ fn check_code(code: String) -> Result<(), String> {
 /// Start a session. Returns as soon as the work is queued; progress arrives as
 /// `narco` events.
 #[tauri::command]
-async fn connect(app: AppHandle, state: State<'_, AppState>, secrets: Vec<String>) -> Result<(), String> {
+async fn connect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    secrets: Vec<String>,
+) -> Result<(), String> {
     // Validate before doing anything slow.
     let derived = narco_proto::derive_multi(&secrets).map_err(|e| e.to_string())?;
 
@@ -107,7 +111,12 @@ async fn run_session(
 ) -> String {
     let app_status = app.clone();
     let transport = match TorTransport::bootstrap(move |s| {
-        emit(&app_status, UiEvent::Status { text: status_text(s).into() });
+        emit(
+            &app_status,
+            UiEvent::Status {
+                text: status_text(s).into(),
+            },
+        );
     })
     .await
     {
@@ -117,11 +126,19 @@ async fn run_session(
 
     let app_status = app.clone();
     let connected = narco_tor::connect(&transport, &derived, move |s| {
-        emit(&app_status, UiEvent::Status { text: status_text(s).into() });
+        emit(
+            &app_status,
+            UiEvent::Status {
+                text: status_text(s).into(),
+            },
+        );
     })
     .await;
 
-    let Connected { mut session, stream } = match connected {
+    let Connected {
+        mut session,
+        stream,
+    } = match connected {
         Ok(c) => c,
         Err(e) => return e.to_string(),
     };
@@ -185,7 +202,8 @@ async fn run_session(
 fn send(state: State<'_, AppState>, text: String) -> Result<(), String> {
     let guard = state.tx.lock().expect("state poisoned");
     let tx = guard.as_ref().ok_or("no session")?;
-    tx.try_send(Cmd::Send(text)).map_err(|_| "session busy".to_string())
+    tx.try_send(Cmd::Send(text))
+        .map_err(|_| "session busy".to_string())
 }
 
 #[tauri::command]

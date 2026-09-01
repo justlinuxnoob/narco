@@ -1,0 +1,99 @@
+name: release
+
+# Publishes installers to the Releases page, where people can actually find
+# them. CI artifacts are not enough: they are buried under a workflow run,
+# require a GitHub login to download, and expire.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: linux
+          - os: windows-latest
+            label: windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf libgtk-3-dev build-essential curl wget file libssl-dev
+
+      - name: Install frontend
+        working-directory: app
+        run: npm ci
+
+      - name: Build
+        working-directory: app
+        run: npm run tauri build
+
+      # AppImage is the one that matters for Arch-family distros, which have no
+      # use for the .deb.
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: Narco ${{ github.event.inputs.tag || github.ref_name }}
+          draft: false
+          prerelease: true
+          fail_on_unmatched_files: false
+          body: |
+            Private chat for two people. No accounts, no server, no history.
+
+            **This is early software and has not been audited.** Do not stake
+            your safety on it.
+
+            ### Download
+
+            | Platform | File |
+            | --- | --- |
+            | Linux (any distro) | `.AppImage` — `chmod +x`, then run |
+            | Debian / Ubuntu | `.deb` |
+            | Windows | `.exe` installer |
+
+            Windows will warn that the publisher is unknown, because the build
+            is unsigned. Choose **More info → Run anyway**.
+
+            ### First connection takes a few minutes
+
+            Narco has no server. The two apps find each other through the Tor
+            network, which means joining Tor and publishing an onion address
+            before anything can happen. Measured cold start: around four
+            minutes. Later connections are faster.
+
+            Both people enter the same secret, in the same order if you use
+            more than one. Generate a fresh secret for each conversation.
+          files: |
+            app/src-tauri/target/release/bundle/appimage/*.AppImage
+            app/src-tauri/target/release/bundle/deb/*.deb
+            app/src-tauri/target/release/bundle/nsis/*.exe
+            app/src-tauri/target/release/bundle/msi/*.msi

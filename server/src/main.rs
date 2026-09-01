@@ -86,7 +86,9 @@ struct AppState {
 
 impl AppState {
     fn new() -> Self {
-        Self { rooms: Mutex::new(HashMap::new()) }
+        Self {
+            rooms: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -118,7 +120,10 @@ async fn main() {
 
     // The only startup line. Note what is absent: no request logging middleware
     // is installed anywhere in this file, by design.
-    println!("narco-relay v{} listening on {addr}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "narco-relay v{} listening on {addr}",
+        env!("CARGO_PKG_VERSION")
+    );
 
     axum::serve(
         listener,
@@ -233,9 +238,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 /// Read frames until a well-formed join frame arrives, or give up.
 ///
 /// This is the only frame this server ever parses.
-async fn read_join(
-    stream: &mut futures_util::stream::SplitStream<WebSocket>,
-) -> Option<String> {
+async fn read_join(stream: &mut futures_util::stream::SplitStream<WebSocket>) -> Option<String> {
     let msg = stream.next().await?.ok()?;
     let Message::Binary(b) = msg else {
         // Text, or anything else, as a first frame is a protocol violation.
@@ -336,8 +339,8 @@ async fn relay_loop(
 
         // Token bucket. Tripping it drops the connection, which ends the room.
         let now = Instant::now();
-        bucket = (bucket + now.duration_since(last_refill).as_secs_f64() * RATE_PER_SEC)
-            .min(RATE_BURST);
+        bucket =
+            (bucket + now.duration_since(last_refill).as_secs_f64() * RATE_PER_SEC).min(RATE_BURST);
         last_refill = now;
         if bucket < 1.0 {
             return;
@@ -423,7 +426,11 @@ mod tests {
 
         assert_eq!(join_room(&state, id, tx0), Some(0));
         assert_eq!(join_room(&state, id, tx1), Some(1));
-        assert_eq!(join_room(&state, id, tx2), None, "third peer must be refused");
+        assert_eq!(
+            join_room(&state, id, tx2),
+            None,
+            "third peer must be refused"
+        );
 
         // First peer: waiting, then peer_joined, in that order.
         assert_eq!(next_sys(&mut rx0), SYS_WAITING);
@@ -471,13 +478,19 @@ mod tests {
             for i in 0..MAX_ROOMS {
                 rooms.insert(
                     format!("{i:032x}"),
-                    Room { peers: [None, None], last_activity: Instant::now() },
+                    Room {
+                        peers: [None, None],
+                        last_activity: Instant::now(),
+                    },
                 );
             }
         }
         let (tx, _rx) = dummy();
         // A brand-new room is refused at capacity...
-        assert_eq!(join_room(&state, "ffffffffffffffffffffffffffffffff", tx), None);
+        assert_eq!(
+            join_room(&state, "ffffffffffffffffffffffffffffffff", tx),
+            None
+        );
         // ...but an existing room still accepts its second peer.
         let (tx2, _rx2) = dummy();
         assert_eq!(join_room(&state, &format!("{:032x}", 0), tx2), Some(0));
@@ -499,7 +512,10 @@ mod tests {
             );
             rooms.insert(
                 "1".repeat(32),
-                Room { peers: [Some(tx_new), None], last_activity: Instant::now() },
+                Room {
+                    peers: [Some(tx_new), None],
+                    last_activity: Instant::now(),
+                },
             );
         }
 
@@ -517,8 +533,14 @@ mod tests {
         });
 
         let rooms = state.rooms.lock().unwrap();
-        assert!(!rooms.contains_key(&"0".repeat(32)), "idle room must be reaped");
-        assert!(rooms.contains_key(&"1".repeat(32)), "active room must survive");
+        assert!(
+            !rooms.contains_key(&"0".repeat(32)),
+            "idle room must be reaped"
+        );
+        assert!(
+            rooms.contains_key(&"1".repeat(32)),
+            "active room must survive"
+        );
         assert!(matches!(rx_old.try_recv(), Ok(Out::Sys(SYS_EXPIRED))));
         assert!(matches!(rx_old.try_recv(), Ok(Out::Close)));
     }
@@ -528,11 +550,13 @@ mod tests {
         let state = AppState::new();
         let id = "b".repeat(32);
         let stale = Instant::now() - Duration::from_secs(300);
-        state
-            .rooms
-            .lock()
-            .unwrap()
-            .insert(id.clone(), Room { peers: [None, None], last_activity: stale });
+        state.rooms.lock().unwrap().insert(
+            id.clone(),
+            Room {
+                peers: [None, None],
+                last_activity: stale,
+            },
+        );
         touch(&state, &id);
         assert!(state.rooms.lock().unwrap()[&id].last_activity > stale);
     }

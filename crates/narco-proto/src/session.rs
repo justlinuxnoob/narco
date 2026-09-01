@@ -209,8 +209,14 @@ impl Session {
 
         self.my_confirm = mine;
         self.peer_confirm_expected = theirs;
-        self.tx = Some(Dir { key: tx_key, ctr: 0 });
-        self.rx = Some(Dir { key: rx_key, ctr: 0 });
+        self.tx = Some(Dir {
+            key: tx_key,
+            ctr: 0,
+        });
+        self.rx = Some(Dir {
+            key: rx_key,
+            ctr: 0,
+        });
         self.phase = Phase::AwaitConfirm;
 
         Ok(Event::Send(frame::confirm_frame(&self.my_confirm)))
@@ -232,14 +238,20 @@ impl Session {
         let rx = self.rx.as_mut().ok_or(Error::WrongPhase)?;
         // The transport is ordered, so any deviation is tampering, not loss.
         if ctr != rx.ctr {
-            return Err(Error::OutOfOrder { expected: rx.ctr, got: ctr });
+            return Err(Error::OutOfOrder {
+                expected: rx.ctr,
+                got: ctr,
+            });
         }
         let cipher =
             ChaCha20Poly1305::new_from_slice(rx.key.as_ref()).map_err(|_| Error::Decrypt)?;
         let padded = cipher
             .decrypt(
                 &nonce_for(ctr).into(),
-                Payload { msg: ct, aad: &aad_for(ctr) },
+                Payload {
+                    msg: ct,
+                    aad: &aad_for(ctr),
+                },
             )
             .map_err(|_| Error::Decrypt)?;
         let padded = Zeroizing::new(padded);
@@ -270,7 +282,10 @@ impl Session {
             let ct = cipher
                 .encrypt(
                     &nonce_for(ctr).into(),
-                    Payload { msg: padded.as_ref(), aad: &aad_for(ctr) },
+                    Payload {
+                        msg: padded.as_ref(),
+                        aad: &aad_for(ctr),
+                    },
                 )
                 .map_err(|_| Error::Decrypt)?;
             tx.ratchet();
@@ -434,7 +449,10 @@ mod tests {
         assert!(matches!(b.handle(&frame).unwrap(), Event::Message(_)));
         assert_eq!(
             b.handle(&frame).unwrap_err(),
-            Error::OutOfOrder { expected: 1, got: 0 }
+            Error::OutOfOrder {
+                expected: 1,
+                got: 0
+            }
         );
         assert_eq!(b.phase(), Phase::Dead);
     }
@@ -446,7 +464,10 @@ mod tests {
         let second = a.encrypt(b"two").unwrap();
         assert_eq!(
             b.handle(&second).unwrap_err(),
-            Error::OutOfOrder { expected: 0, got: 1 }
+            Error::OutOfOrder {
+                expected: 0,
+                got: 1
+            }
         );
         drop(first);
     }
@@ -473,7 +494,13 @@ mod tests {
         let ct = &frame1[9..];
         let cipher = ChaCha20Poly1305::new_from_slice(key0.as_ref()).unwrap();
         assert!(cipher
-            .decrypt(&nonce_for(1).into(), Payload { msg: ct, aad: &aad_for(1) })
+            .decrypt(
+                &nonce_for(1).into(),
+                Payload {
+                    msg: ct,
+                    aad: &aad_for(1)
+                }
+            )
             .is_err());
         // And the key genuinely changed.
         assert_ne!(a.tx.as_ref().unwrap().key.as_ref(), key0.as_ref());
@@ -503,7 +530,10 @@ mod tests {
         a.wipe();
         assert_eq!(a.phase(), Phase::Dead);
         assert_eq!(a.encrypt(b"x").unwrap_err(), Error::WrongPhase);
-        assert_eq!(a.handle(&frame::msg_frame(0, b"x")).unwrap_err(), Error::Dead);
+        assert_eq!(
+            a.handle(&frame::msg_frame(0, b"x")).unwrap_err(),
+            Error::Dead
+        );
     }
 
     #[test]
@@ -522,9 +552,18 @@ mod tests {
     fn peers_take_opposite_roles_so_directions_do_not_collide() {
         let (a, b) = handshake(CODE, CODE).unwrap();
         // A's send key must be B's receive key, and vice versa.
-        assert_eq!(a.tx.as_ref().unwrap().key.as_ref(), b.rx.as_ref().unwrap().key.as_ref());
-        assert_eq!(a.rx.as_ref().unwrap().key.as_ref(), b.tx.as_ref().unwrap().key.as_ref());
+        assert_eq!(
+            a.tx.as_ref().unwrap().key.as_ref(),
+            b.rx.as_ref().unwrap().key.as_ref()
+        );
+        assert_eq!(
+            a.rx.as_ref().unwrap().key.as_ref(),
+            b.tx.as_ref().unwrap().key.as_ref()
+        );
         // The two directions must not share a key.
-        assert_ne!(a.tx.as_ref().unwrap().key.as_ref(), a.rx.as_ref().unwrap().key.as_ref());
+        assert_ne!(
+            a.tx.as_ref().unwrap().key.as_ref(),
+            a.rx.as_ref().unwrap().key.as_ref()
+        );
     }
 }
