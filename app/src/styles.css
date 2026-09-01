@@ -70,6 +70,17 @@ h1 {
   padding: 0;
 }
 
+/* A caution, not a failure: the app still proceeds. Distinguished from .error
+   by a dotted rule rather than colour, which the black-on-white palette has
+   none of to spare. */
+.warn {
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.6;
+  border-left: 2px dotted var(--ink);
+  padding-left: 8px;
+}
+
 /* --- inputs ------------------------------------------------------------- */
 
 input {

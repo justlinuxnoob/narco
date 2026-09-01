@@ -10,60 +10,73 @@
     <!-- Entry -->
     <main id="entry" class="screen">
       <h1>narco</h1>
-      <p class="sub">Both people enter the same secrets, in the same order.</p>
+      <p class="sub">Private chat for two people. Nothing is stored anywhere.</p>
 
-      <div id="secrets"></div>
-
-      <button id="add" class="ghost small" type="button">+ add another secret</button>
-
-      <p class="hint">
-        Send each secret a different way — one messaged, one spoken aloud.
-        Someone who intercepts only one learns nothing.
-      </p>
-
-      <details id="settings">
-        <summary>settings</summary>
-        <label class="setting">
-          <span>end chat after silence</span>
-          <select id="idle">
-            <option value="300">5 minutes</option>
-            <option value="600" selected>10 minutes</option>
-            <option value="1800">30 minutes</option>
-            <option value="3600">1 hour</option>
-            <option value="0">never</option>
-          </select>
-        </label>
-        <label class="setting">
-          <span>messages vanish after</span>
-          <select id="burn">
-            <option value="0" selected>off</option>
-            <option value="30">30 seconds</option>
-            <option value="60">1 minute</option>
-            <option value="300">5 minutes</option>
-          </select>
-        </label>
+      <!-- Pick a side first. Two people both tapping "start", or both tapping
+           "join", will never meet — and with the old pair of buttons under a
+           shared field, nothing said which of you does which. -->
+      <div id="choose">
+        <button id="choose-host" type="button">Start a new chat</button>
+        <button id="choose-join" class="ghost" type="button">Join a chat</button>
         <p class="hint">
-          Nothing is ever written to disk. These only change how long things
-          stay in memory and on screen.
+          Like a phone call: one of you dials, the other answers.
         </p>
-      </details>
+      </div>
+
+      <div id="compose" hidden>
+        <p class="sub" id="compose-lead"></p>
+
+        <div id="secrets"></div>
+
+        <button id="add" class="ghost small" type="button">+ add another secret</button>
+
+        <p class="hint" id="compose-hint"></p>
+
+        <p class="warn" id="typed-warning" hidden>
+          A code you invent is far easier to guess than a generated one, and
+          anyone who guesses it can join this chat. Use <strong>gen</strong>
+          unless you have a reason not to.
+        </p>
+
+        <details id="settings">
+          <summary>settings</summary>
+          <label class="setting">
+            <span>end chat after silence</span>
+            <select id="idle">
+              <option value="300">5 minutes</option>
+              <option value="600" selected>10 minutes</option>
+              <option value="1800">30 minutes</option>
+              <option value="3600">1 hour</option>
+              <option value="0">never</option>
+            </select>
+          </label>
+          <label class="setting">
+            <span>messages vanish after</span>
+            <select id="burn">
+              <option value="0" selected>off</option>
+              <option value="30">30 seconds</option>
+              <option value="60">1 minute</option>
+              <option value="300">5 minutes</option>
+            </select>
+          </label>
+          <p class="hint">
+            Nothing is ever written to disk. These only change how long things
+            stay in memory and on screen.
+          </p>
+        </details>
+
+        <div class="row">
+          <button id="go" type="button">start</button>
+          <button id="back" class="ghost" type="button">back</button>
+        </div>
+
+        <p class="error" id="entry-error" role="alert"></p>
+      </div>
 
       <p class="tor-state" id="tor-state">joining tor…</p>
       <button id="tor-retry" class="ghost small" type="button" hidden>
         retry connecting to tor
       </button>
-
-      <div class="row">
-        <button id="host" type="button">start &amp; host</button>
-        <button id="join" class="ghost" type="button">join</button>
-      </div>
-      <p class="hint">
-        One of you taps <strong>start &amp; host</strong> and shares the code; the
-        other pastes it and taps <strong>join</strong>. Like a call — one dials,
-        one answers.
-      </p>
-
-      <p class="error" id="entry-error" role="alert"></p>
 
       <details id="diag">
         <summary>diagnostics</summary>

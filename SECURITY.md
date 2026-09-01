@@ -29,9 +29,16 @@ is the honest recommendation.
   messenger survives a device someone else controls.
 - **Observe that you use Tor.** Narco is not an anonymity system on its own. A
   network observer sees a Tor connection, not who you talked to or what you said.
-- **Guess a weak secret.** The room address is derived from the secret. A
-  guessable secret means a guessable address. Argon2id at 32 MiB makes each guess
-  expensive, but it cannot rescue `password12345`. Use the generate button.
+- **Hunt for weak secrets without touching you.** This is the sharpest edge in
+  the design, so it is worth stating plainly. The onion address is derived from
+  the secret, so an attacker can guess a secret, derive its address, and ask the
+  Tor directory whether that service exists — offline, in bulk, with no
+  connection to either of you and nothing you could observe. Argon2id at 32 MiB
+  prices each guess in memory rather than cycles, which rules out cheap GPU
+  farming, but it only buys a constant factor. What actually decides this is the
+  secret: a generated one is 130 bits and unreachable; one a person invents is
+  usually nearer 30 bits, and 30 bits is a weekend on rented hardware. **Use the
+  generated code.** Narco fills one in for you and warns when you replace it.
 - **Reuse a leaked secret.** Old messages stay unrecoverable, but someone with
   your secret can open a *new* room at the same address and impersonate your
   contact. Generate a fresh secret per conversation.
@@ -52,9 +59,11 @@ Places where a reviewer should look hardest:
 3. **The fixed Argon2id salt** is unavoidable — both peers derive from the
    secrets alone. It makes the derivation a global precomputation target, which
    is exactly why the work factor and the code-strength rules matter.
-4. **Self-connections are expected.** Both peers publish and dial the same
-   address, so one reaches itself. The SPAKE2 reflection check rejects it. If
-   that check were removed, a peer could complete a handshake with itself.
+4. **Roles are asymmetric, so a self-connection cannot happen.** One person
+   hosts and publishes; the other only dials. An earlier design had both do
+   both, which meant each peer also reached itself and relied on the SPAKE2
+   reflection check to reject it. The reflection check is still there, but it is
+   now a backstop rather than load-bearing.
 5. **Padding is verified on receive.** Trailing bytes must be zero and the length
    must be a valid bucket, closing a malleability channel.
 
@@ -62,6 +71,13 @@ Places where a reviewer should look hardest:
 
 Nothing is hand-rolled. Argon2id (`argon2`), HKDF-SHA256 (`hkdf`), SPAKE2 over
 Ed25519 (`spake2`), ChaCha20-Poly1305 (`chacha20poly1305`), constant-time
-comparison (`subtle`), key erasure (`zeroize`). Tor via `arti-client`.
+comparison (`subtle`), key erasure (`zeroize`).
+
+Tor is the C `tor` daemon from the Tor Expert Bundle — the same binary Tor
+Browser ships — driven over its control port as a child process. Narco used the
+Arti library until 0.5.0, and switched because Arti could not complete circuits
+on several Windows machines: channels handshook, then every circuit sat unused
+until the relay tore it down. No cryptography moved with that change; the
+transport crate does no crypto and the protocol crate has no Tor dependency.
 
 `#![forbid(unsafe_code)]` in every crate.

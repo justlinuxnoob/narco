@@ -72,6 +72,31 @@ fn plain(path: PathBuf) -> PathBuf {
     }
 }
 
+/// The app's native library directory on Android.
+///
+/// Its real path carries the package name and an install-specific suffix, so it
+/// cannot be constructed — and reading it properly means a JNI call into
+/// `ApplicationInfo`. But our own libraries are already mapped from it, and
+/// `/proc/self/maps` names the file backing every mapping, so the directory can
+/// simply be read back out of our own address space.
+#[cfg(target_os = "android")]
+fn native_library_dir() -> Option<PathBuf> {
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    for line in maps.lines() {
+        // A mapping backed by a file ends with its absolute path.
+        let Some(start) = line.find(" /") else {
+            continue;
+        };
+        let path = Path::new(line[start + 1..].trim_end());
+        let is_lib = path.extension().is_some_and(|e| e == "so")
+            && path.components().any(|c| c.as_os_str() == "lib");
+        if is_lib && path.starts_with("/data") {
+            return path.parent().map(Path::to_path_buf);
+        }
+    }
+    None
+}
+
 /// Locate the `tor` executable.
 ///
 /// Prefers a copy shipped beside our own executable (what the packaged builds
@@ -82,10 +107,24 @@ fn plain(path: PathBuf) -> PathBuf {
 /// reports every one of them. A user whose app cannot find its own daemon can
 /// only send us a log, so the log has to be enough on its own.
 pub fn find_tor_binary() -> Result<PathBuf, DaemonError> {
-    let name = if cfg!(windows) { "tor.exe" } else { "tor" };
+    let name = if cfg!(windows) {
+        "tor.exe"
+    } else if cfg!(target_os = "android") {
+        // Android refuses to execute anything outside the app's native library
+        // directory, so Tor ships its daemon named like a library and it rides
+        // into the APK as one.
+        "libTor.so"
+    } else {
+        "tor"
+    };
     let mut tried = Vec::new();
 
     let mut roots = Vec::new();
+
+    #[cfg(target_os = "android")]
+    if let Some(dir) = native_library_dir() {
+        roots.push(dir);
+    }
     // Set by the app to Tauri's resource directory, whose location differs per
     // platform and packaging format, so it cannot be guessed from here.
     if let Some(dir) = std::env::var_os("NARCO_TOR_DIR") {

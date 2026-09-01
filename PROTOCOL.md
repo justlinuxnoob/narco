@@ -430,10 +430,17 @@ at nothing, so no third party can establish a new connection.
 
 ### 11.4 Keys and disk
 
-Arti is configured with `ArtiKeystoreKind::Ephemeral`, an in-memory keystore, so
-the code-derived onion identity is **never written to disk**. Tor's own consensus
-cache and guard state are still stored normally; they contain no Narco key,
-message, or room identifier.
+The code-derived onion identity is **never written to disk**. It is handed to
+the daemon over the control port as an `ED25519-V3` blob in `ADD_ONION`, with
+`Flags=DiscardPK` so tor does not echo it back, and it exists only in the two
+processes' memory. `ADD_ONION` services are ephemeral by definition: tor keeps
+no on-disk record of them, which is why this route is used instead of a
+configured `HiddenServiceDir`.
+
+Tor's own consensus cache and guard state are still stored normally, in a
+directory belonging to this app. They contain no Narco key, message, or room
+identifier. That directory is deleted when the daemon shuts down, and a copy
+left in a shape tor cannot use is discarded rather than passed to it.
 
 ### 11.5 Measured cost
 
