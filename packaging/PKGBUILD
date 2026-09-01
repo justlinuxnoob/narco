@@ -1,0 +1,80 @@
+# Maintainer: justlinuxnoob <https://github.com/justlinuxnoob>
+#
+# Arch / CachyOS / Manjaro package for Narco.
+#
+# Tauri cannot emit pacman packages — it only produces deb, rpm, and AppImage —
+# so this repackages the released AppImage into a normal system package with a
+# desktop entry, icon, and `narco` on your PATH.
+#
+#   cd packaging && makepkg -si
+#
+# To build from source instead, see the narco-git PKGBUILD notes at the bottom.
+
+pkgname=narco-bin
+_pkgname=narco
+pkgver=0.1.1
+pkgrel=1
+pkgdesc="Private chat for two people. No accounts, no server, no history."
+arch=('x86_64')
+url="https://github.com/justlinuxnoob/narco"
+license=('AGPL-3.0-or-later')
+# The AppImage bundles its own runtime; FUSE is only needed to extract it here.
+depends=('webkit2gtk-4.1' 'gtk3')
+makedepends=('fuse2')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+options=('!strip')
+
+source=("$_pkgname-$pkgver.AppImage::$url/releases/download/v$pkgver/Narco_${pkgver}_amd64.AppImage")
+# Replaced on each release. Verify against the published checksum before trusting.
+sha256sums=('SKIP')
+
+prepare() {
+    chmod +x "$_pkgname-$pkgver.AppImage"
+    # --appimage-extract avoids needing FUSE mounted at build time.
+    ./"$_pkgname-$pkgver.AppImage" --appimage-extract > /dev/null
+}
+
+package() {
+    cd "$srcdir/squashfs-root"
+
+    install -Dm755 "usr/bin/$_pkgname-app" "$pkgdir/usr/bin/$_pkgname" 2>/dev/null \
+        || install -Dm755 "usr/bin/narco-app" "$pkgdir/usr/bin/$_pkgname"
+
+    # Desktop entry, if the AppImage shipped one; otherwise write a minimal one.
+    if [ -f "$_pkgname.desktop" ] || [ -f "narco-app.desktop" ]; then
+        install -Dm644 ./*.desktop "$pkgdir/usr/share/applications/$_pkgname.desktop"
+        sed -i "s|^Exec=.*|Exec=$_pkgname|" "$pkgdir/usr/share/applications/$_pkgname.desktop"
+    else
+        install -dm755 "$pkgdir/usr/share/applications"
+        cat > "$pkgdir/usr/share/applications/$_pkgname.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Narco
+Comment=$pkgdesc
+Exec=$_pkgname
+Icon=$_pkgname
+Categories=Network;InstantMessaging;
+Terminal=false
+EOF
+    fi
+
+    for size in 32x32 128x128 256x256; do
+        icon="usr/share/icons/hicolor/$size/apps/narco-app.png"
+        [ -f "$icon" ] && install -Dm644 "$icon" \
+            "$pkgdir/usr/share/icons/hicolor/$size/apps/$_pkgname.png"
+    done
+
+    install -Dm644 "$srcdir/../../LICENSE" \
+        "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
+}
+
+# Building from source instead:
+#
+#   pacman -S --needed rust nodejs npm webkit2gtk-4.1 base-devel curl wget \
+#                      file openssl appmenu-gtk-module libappindicator-gtk3 \
+#                      librsvg
+#   git clone https://github.com/justlinuxnoob/narco && cd narco/app
+#   npm ci && npm run tauri build
+#
+# Expect a long compile: Tor (Arti) is 500+ crates.
