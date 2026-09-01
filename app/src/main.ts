@@ -142,8 +142,9 @@ const warmTor = () => {
   $("tor-state").classList.remove("ready", "failed");
   invoke("warm_tor").catch(() => {});
 };
-warmTor();
 $("tor-retry").addEventListener("click", warmTor);
+// The initial warmTor() is deferred until the event listener is attached (see
+// the bottom of this file) so the first Tor events are never dropped.
 
 // --- connecting progress --------------------------------------------------
 
@@ -330,4 +331,7 @@ listen<UiEvent>("narco", ({ payload }) => {
       break;
     }
   }
+}).then(() => {
+  // Listener is attached; now it is safe to start Tor without racing it.
+  warmTor();
 });

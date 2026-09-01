@@ -181,9 +181,62 @@ impl TorTransport {
         let config = builder
             .build()
             .map_err(|e| TorError::Config(e.to_string()))?;
-        let client = TorClient::create_bootstrapped(config)
-            .await
+
+        // Build unbootstrapped and drive bootstrap ourselves so we can report
+        // progress AND enforce a timeout. `create_bootstrapped` does neither —
+        // on a network that blocks Tor it retries internally forever, which is
+        // the "stuck on joining tor" hang users hit.
+        let client = TorClient::builder()
+            .config(config)
+            .create_unbootstrapped()
             .map_err(|e| TorError::Bootstrap(e.to_string()))?;
+
+        // Scoped so the borrows `bootstrap()`/`bootstrap_events()` take on
+        // `client` are released before `client` is moved into `Self`.
+        {
+            let mut events = client.bootstrap_events();
+            let bootstrapping = client.bootstrap();
+            futures::pin_mut!(bootstrapping);
+
+            // Arti only emits an event when progress changes, so a stall goes
+            // silent. A 2s heartbeat keeps the UI moving; the deadline turns an
+            // indefinite hang into a clear, actionable error.
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let deadline = tokio::time::Instant::now() + BOOTSTRAP_TIMEOUT;
+            let mut percent = 0u8;
+            let mut blocked: Option<String> = None;
+
+            loop {
+                tokio::select! {
+                    done = &mut bootstrapping => {
+                        done.map_err(|e| TorError::Bootstrap(e.to_string()))?;
+                        break;
+                    }
+                    Some(st) = events.next() => {
+                        blocked = st.blocked().map(|b| b.to_string());
+                        percent = (st.as_frac() * 100.0).clamp(0.0, 100.0) as u8;
+                        match &blocked {
+                            Some(d) => on_status(Status::TorBlocked { detail: d.clone() }),
+                            None => on_status(Status::BootstrappingTor { percent }),
+                        }
+                    }
+                    _ = tick.tick() => {
+                        match &blocked {
+                            Some(d) => on_status(Status::TorBlocked { detail: d.clone() }),
+                            None => on_status(Status::BootstrappingTor { percent }),
+                        }
+                    }
+                    _ = tokio::time::sleep_until(deadline) => {
+                        return Err(TorError::Bootstrap(format!(
+                            "could not reach the Tor network after {}s (stuck at {percent}%). \
+                             This network is probably blocking Tor — try a phone hotspot or a VPN.",
+                            BOOTSTRAP_TIMEOUT.as_secs()
+                        )));
+                    }
+                }
+            }
+        }
 
         Ok(Self { client })
     }
