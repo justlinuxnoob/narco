@@ -15,11 +15,20 @@ use std::time::Duration;
 pub const MAX_FRAME: usize = 128 * 1024;
 
 /// Give up on a peer that never appears.
-const MEET_TIMEOUT: Duration = Duration::from_secs(300);
+///
+/// Deliberately far longer than a connection takes. A measured cold connect is
+/// around 258 s, so the previous 300 s left a 42-second margin — meaning the
+/// two people had to press start within about forty seconds of each other or
+/// the first one gave up before the second was ready. Waiting costs nothing;
+/// the user can cancel whenever they like.
+const MEET_TIMEOUT: Duration = Duration::from_secs(1800);
 
-/// Give up on a candidate that stalls mid-handshake, so one dead connection
-/// cannot block the ones behind it.
-const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Give up on a candidate that stalls mid-handshake.
+///
+/// The handshake is two round trips over an already-established circuit, so a
+/// live peer answers in seconds. A candidate still silent after this is our own
+/// service, and no longer blocks anything now that candidates run concurrently.
+const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub enum ConnectError {
@@ -133,24 +142,54 @@ pub async fn connect(
 
     let deadline = tokio::time::Instant::now() + MEET_TIMEOUT;
 
+    // Candidates are handshaken *concurrently*, not one after another.
+    //
+    // Connecting to our own service is normal here — it is how the shared
+    // address works — and such a candidate never completes a handshake, so it
+    // simply hangs until its timeout. Trying candidates sequentially let a few
+    // of those queue ahead of the peer's real connection and consume the whole
+    // budget before it was ever attempted, which looked exactly like "the other
+    // person never arrived".
+    let mut running = tokio::task::JoinSet::new();
+
     loop {
-        let next = tokio::time::timeout_at(deadline, candidates.recv()).await;
-        let Ok(Some(mut stream)) = next else {
-            return Err(ConnectError::TimedOut);
-        };
+        tokio::select! {
+            // A new candidate arrived: start its handshake alongside the others.
+            next = tokio::time::timeout_at(deadline, candidates.recv()) => {
+                match next {
+                    Ok(Some(mut stream)) => {
+                        let derived = derived.clone();
+                        running.spawn(async move {
+                            let out = tokio::time::timeout(
+                                CANDIDATE_TIMEOUT,
+                                try_candidate(&mut stream, &derived),
+                            )
+                            .await;
+                            match out {
+                                Ok(Ok(Some(session))) => Some((session, stream)),
+                                _ => None,
+                            }
+                        });
+                    }
+                    // Channel closed, or the overall deadline passed.
+                    _ => return Err(ConnectError::TimedOut),
+                }
+            }
 
-        let attempt =
-            tokio::time::timeout(CANDIDATE_TIMEOUT, try_candidate(&mut stream, derived)).await;
-
-        if let Ok(Ok(Some(session))) = attempt {
-            on_status(Status::PeerFound);
-            // Both people are in. Take the door away: dropping the service
-            // unpublishes the address, so a third party cannot connect.
-            drop(service);
-            drop(candidates);
-            return Ok(Connected { session, stream });
+            // One of the in-flight handshakes finished.
+            Some(done) = running.join_next(), if !running.is_empty() => {
+                if let Ok(Some((session, stream))) = done {
+                    on_status(Status::PeerFound);
+                    // Both people are in. Take the door away: dropping the
+                    // service unpublishes the address, so nobody else can join.
+                    drop(service);
+                    drop(candidates);
+                    running.abort_all();
+                    return Ok(Connected { session, stream });
+                }
+                // Not a real peer. The others keep going.
+            }
         }
-        // Not a real peer, or it stalled. Try the next candidate.
     }
 }
 
