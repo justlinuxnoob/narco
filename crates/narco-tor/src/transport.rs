@@ -76,17 +76,28 @@ fn configure_bridges(
         builder.bridges().bridges().push(bridge);
     }
 
-    // Point the obfs4 transport at the bundled lyrebird binary and launch it
-    // on startup so circuits can use it immediately.
-    let obfs4 = "obfs4"
-        .parse()
-        .map_err(|e| TorError::Config(format!("obfs4 protocol name: {e}")))?;
-    let mut transport = TransportConfigBuilder::default();
-    transport
-        .protocols(vec![obfs4])
-        .path(CfgPath::new_literal(bridges.lyrebird_path.clone()))
-        .run_on_startup(true);
-    builder.bridges().transports().push(transport);
+    // Register every transport named in the bridge lines (obfs4, snowflake, …),
+    // all served by the one bundled lyrebird binary, which provides them all.
+    // Deriving the set from the lines rather than hardcoding obfs4 means
+    // snowflake — whose config domain-fronts to a fixed broker and so does not
+    // rot like obfs4 bridge IPs — works with no code change.
+    let mut names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for line in &bridges.lines {
+        if let Some(name) = line.split_whitespace().next() {
+            names.insert(name);
+        }
+    }
+    for name in names {
+        let proto = name
+            .parse()
+            .map_err(|e| TorError::Config(format!("bad transport name {name:?}: {e}")))?;
+        let mut transport = TransportConfigBuilder::default();
+        transport
+            .protocols(vec![proto])
+            .path(CfgPath::new_literal(bridges.lyrebird_path.clone()))
+            .run_on_startup(true);
+        builder.bridges().transports().push(transport);
+    }
 
     Ok(())
 }

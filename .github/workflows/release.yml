@@ -71,6 +71,16 @@ jobs:
         working-directory: app
         run: npm run tauri build
 
+      # A portable Windows build: the raw exe (frontend embedded), no installer.
+      # Just download and run — no install, no SmartScreen install step.
+      - name: Stage portable Windows exe
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          V="${{ github.event.inputs.tag || github.ref_name }}"; V="${V#v}"
+          mkdir -p portable
+          cp app/src-tauri/target/release/narco-app.exe "portable/Narco_${V}_portable.exe"
+
       # AppImage is the one that matters for Arch-family distros, which have no
       # use for the .deb.
       - name: Publish
@@ -112,3 +122,4 @@ jobs:
             app/src-tauri/target/release/bundle/deb/*.deb
             app/src-tauri/target/release/bundle/nsis/*.exe
             app/src-tauri/target/release/bundle/msi/*.msi
+            portable/*.exe
