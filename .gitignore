@@ -1,0 +1,11 @@
+target/
+node_modules/
+dist/
+app/src-tauri/gen/
+*.log
+
+# Never commit anything that could be a real secret.
+*.pem
+*.key
+.env
+.env.*

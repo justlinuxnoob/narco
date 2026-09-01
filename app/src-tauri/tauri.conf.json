@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Narco",
+  "version": "0.1.0",
+  "identifier": "app.narco.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Narco",
+        "width": 440,
+        "height": 700,
+        "minWidth": 360,
+        "minHeight": 480,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "Private two-person chat with no server",
+    "longDescription": "Two people enter the same secret. They meet over Tor through an address derived from that secret, with no server involved. Messages are end-to-end encrypted and exist only in memory; when the session ends, everything is destroyed."
+  }
+}

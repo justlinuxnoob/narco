@@ -1,0 +1,263 @@
+/* Black on white. No colour, no chrome, no decoration that isn't load-bearing. */
+
+:root {
+  --ink: #000;
+  --paper: #fff;
+  --muted: #767676; /* 4.54:1 on white — passes AA */
+  --line: #e3e3e3;
+  --radius: 2px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font: 15px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 28px 22px calc(22px + env(safe-area-inset-bottom));
+  gap: 14px;
+}
+
+.screen.hidden {
+  display: none;
+}
+
+h1 {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+  text-transform: lowercase;
+}
+
+.sub {
+  color: var(--muted);
+  margin-top: -8px;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.error {
+  color: var(--ink);
+  font-size: 12.5px;
+  min-height: 1.2em;
+  border-left: 2px solid var(--ink);
+  padding-left: 8px;
+}
+
+.error:empty {
+  border: 0;
+  padding: 0;
+}
+
+/* --- inputs ------------------------------------------------------------- */
+
+input {
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+
+input::placeholder {
+  color: var(--muted);
+}
+
+input:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+#secrets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.secret {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.secret .n {
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 1.2em;
+  text-align: right;
+}
+
+.secret .remove {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 6px;
+  font: inherit;
+  line-height: 1;
+}
+
+.secret .remove:hover {
+  color: var(--ink);
+}
+
+/* --- buttons ------------------------------------------------------------ */
+
+button {
+  font: inherit;
+  padding: 11px 18px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: var(--paper);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  opacity: 0.82;
+}
+
+button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+button.ghost {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+button.small {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.row button {
+  flex: 1;
+}
+
+/* --- chat --------------------------------------------------------------- */
+
+#chat {
+  padding: 0;
+  gap: 0;
+}
+
+#chat header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink);
+}
+
+.live {
+  color: var(--muted);
+  letter-spacing: 0.1em;
+}
+
+#chat header .ghost {
+  margin-left: auto;
+}
+
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  list-style: none;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#messages li {
+  max-width: 82%;
+  padding: 9px 12px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Sender is shown by alignment and fill, so it survives greyscale. */
+#messages li.me {
+  align-self: flex-end;
+  background: var(--ink);
+  color: var(--paper);
+}
+
+#messages li.them {
+  align-self: flex-start;
+}
+
+#messages li.note {
+  align-self: center;
+  border: 0;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 2px;
+}
+
+#composer {
+  display: flex;
+  gap: 8px;
+  padding: 14px 18px calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+}
+
+#composer input {
+  flex: 1;
+}
+
+.status {
+  font-size: 13px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dot {
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    50% {
+      opacity: 0.25;
+    }
+  }
+}

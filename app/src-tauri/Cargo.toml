@@ -1,0 +1,32 @@
+[package]
+name = "narco-app"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "AGPL-3.0-or-later"
+description = "Narco — private two-person chat with no server"
+repository = "https://github.com/justlinuxnoob/narco"
+
+[lib]
+name = "narco_app_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+narco-proto = { path = "../../crates/narco-proto" }
+narco-tor = { path = "../../crates/narco-tor" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+futures = "0.3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

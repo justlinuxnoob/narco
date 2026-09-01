@@ -1,0 +1,36 @@
+[package]
+name = "narco-proto"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "AGPL-3.0-or-later"
+description = "Narco end-to-end encryption protocol: SPAKE2 handshake and ratcheted transport"
+repository = "https://github.com/justlinuxnoob/narco"
+
+[dependencies]
+# Key agreement. SPAKE2 is what stops a malicious relay from mounting an
+# offline dictionary attack on the room code.
+spake2 = "0.4"
+
+# Code stretching and key derivation.
+argon2 = "0.6"
+hkdf = "0.13"
+sha2 = "0.11"
+
+# Authenticated encryption.
+chacha20poly1305 = "0.11"
+
+# Constant-time comparison for key confirmation.
+subtle = "2.6"
+
+# Key erasure.
+zeroize = { version = "1.9", features = ["alloc"] }
+
+# CSPRNG for code generation.
+getrandom = "0.3"
+
+# NFC normalization so both devices derive from identical bytes.
+unicode-normalization = "0.1"
+
+[lints.rust]
+unsafe_code = "forbid"
