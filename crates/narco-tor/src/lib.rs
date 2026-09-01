@@ -15,7 +15,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod daemon;
 pub mod identity;
+pub mod onion;
 pub mod transport;
 pub mod wire;
 

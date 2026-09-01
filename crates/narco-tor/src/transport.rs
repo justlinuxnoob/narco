@@ -327,11 +327,23 @@ impl TorTransport {
                         // because Tor rejects a consensus that is not valid for
                         // the current time. Say so instead of blaming the
                         // network.
-                        let hint = if percent >= 14 && percent <= 16 {
-                            "Reached the Tor network but could not load its directory. \
-                             This is almost always a wrong system clock — check that \
-                             your device's date, time and time zone are correct \
-                             (enable automatic time) and try again."
+                        // A stall at ~15% means the TLS and Tor channel
+                        // handshakes with relays succeeded but circuits never
+                        // became usable, so the directory was never fetched.
+                        // Observed on Windows machines where the handshake
+                        // completes and then every circuit is torn down unused.
+                        // Security software that inspects connections is the
+                        // usual cause: it passes the handshake (it looks like
+                        // ordinary TLS) and disrupts the Tor cells that follow.
+                        // Do NOT blame the clock here — a clock fault reports
+                        // "directory object expired or not yet valid" instead.
+                        let hint = if (14..=16).contains(&percent) {
+                            "Connected to Tor relays, but no circuit could be completed, \
+                             so the directory never downloaded. Most often this is \
+                             antivirus or firewall software inspecting connections. \
+                             Try temporarily disabling it, or allow this app through. \
+                             A wrong system clock or a network that blocks Tor can also \
+                             cause it."
                         } else {
                             "Could not reach the Tor network. This network may be \
                              blocking Tor — try a phone hotspot or a VPN."
