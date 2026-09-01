@@ -1,0 +1,139 @@
+name: android
+
+# Kept separate from the desktop release on purpose: Android is the least
+# proven target here, and a failure in it must never hold back a Windows or
+# Linux build that people are waiting on.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to attach the APK to (e.g. v0.6.0)"
+        required: false
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    name: apk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: |
+          sdkmanager --install "ndk;27.1.12297006" "platforms;android-34" \
+                               "build-tools;34.0.0"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.1.12297006" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Only the ABIs worth shipping: arm64 is every modern phone, armv7
+          # covers older ones, x86_64 is for emulators.
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          V="${{ github.ref_name }}"; V="${V#v}"
+          node -e "
+            const f='app/src-tauri/tauri.conf.json';
+            const j=JSON.parse(require('fs').readFileSync(f,'utf8'));
+            j.version='$V';
+            require('fs').writeFileSync(f, JSON.stringify(j,null,2)+'\n');
+          "
+          sed -i -E "0,/^version = .*/s//version = \"$V\"/" app/src-tauri/Cargo.toml
+
+      - name: Install frontend
+        working-directory: app
+        run: npm ci
+
+      # Generates gen/android. Must run before the daemon can be dropped into
+      # jniLibs, because this is what creates that tree.
+      - name: Initialise the Android project
+        working-directory: app
+        run: npm run tauri android init
+
+      # Android will not execute a file outside the app's native library
+      # directory. Tor ships its daemon as libTor.so for exactly this reason, so
+      # it installs as a native library and is executable where it lands.
+      - name: Add the tor daemon for each ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOR_VERSION="$(curl -fsSL --retry 3 \
+            https://aus1.torproject.org/torbrowser/update_3/release/downloads.json \
+            | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).version))")"
+          echo "tor version: $TOR_VERSION"
+
+          JNI=app/src-tauri/gen/android/app/src/main/jniLibs
+          # Tor's architecture names on the left, Android's on the right.
+          for pair in "aarch64:arm64-v8a" "armv7:armeabi-v7a" "x86_64:x86_64"; do
+            TOR_ARCH="${pair%%:*}"; ABI="${pair##*:}"
+            url="https://dist.torproject.org/torbrowser/${TOR_VERSION}/tor-expert-bundle-android-${TOR_ARCH}-${TOR_VERSION}.tar.gz"
+            echo "fetching $ABI from $url"
+            curl -fsSL --retry 3 -o "teb-${ABI}.tar.gz" "$url"
+            mkdir -p "$JNI/$ABI"
+            tar xzf "teb-${ABI}.tar.gz" -C "$JNI/$ABI" --strip-components=2 tor/libTor.so
+            test -f "$JNI/$ABI/libTor.so"
+          done
+          find "$JNI" -name 'libTor.so' -printf '%p %s bytes\n'
+
+      # A debug-signed APK: installable on a real phone straight away, which a
+      # release APK is not without a signing key. Publishing signed builds needs
+      # a keystore held as a repository secret — a decision for the repo owner,
+      # not something to generate here, since a key that changes every build
+      # cannot be upgraded over.
+      - name: Build the APK
+        working-directory: app
+        run: npm run tauri android build -- --apk --debug
+
+      - name: Collect the APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          V="${{ github.event.inputs.tag || github.ref_name }}"; V="${V#v}"
+          find app/src-tauri/gen/android -name '*.apk' -print
+          apk="$(find app/src-tauri/gen/android -name '*.apk' | head -1)"
+          test -n "$apk"
+          cp "$apk" "out/Narco_${V}_android.apk"
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: narco-android-apk
+          retention-days: 14
+          path: out/*.apk
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: out/*.apk
+          fail_on_unmatched_files: false
