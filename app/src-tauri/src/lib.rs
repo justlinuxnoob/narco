@@ -101,7 +101,18 @@ async fn connect(
     }
 
     tauri::async_runtime::spawn(async move {
-        let reason = run_session(&app, derived, rx, idle_secs).await;
+        // Catch panics so a bug can never leave the UI waiting forever with no
+        // explanation. Every path out of here emits an Ended event.
+        let reason = match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+            run_session(&app, derived, rx, idle_secs),
+        ))
+        .await
+        {
+            Ok(reason) => reason,
+            Err(_) => "Something went wrong inside the app. The session was ended \
+                       and all keys destroyed."
+                .to_string(),
+        };
         // Whatever happened, the session is over and holds nothing.
         if let Some(state) = app.try_state::<AppState>() {
             *state.tx.lock().expect("state poisoned") = None;
