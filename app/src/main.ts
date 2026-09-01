@@ -157,7 +157,7 @@ function startElapsed() {
   elapsedTimer = window.setInterval(() => {
     const s = Math.floor((Date.now() - startedAt) / 1000);
     $("elapsed").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-    if (s > 360) {
+    if (s > 240) {
       $("patience").innerHTML =
         "Taking longer than usual. It can still succeed — but check that the " +
         "other person has the app open with <strong>exactly</strong> the same " +

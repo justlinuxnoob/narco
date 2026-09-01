@@ -51,9 +51,9 @@ cargo run -p narco-tor --example derive -- "YOUR-SECRET-HERE"
 
 Stated plainly, because a privacy claim that hides its limits is worthless.
 
-- **It is not fast.** A cold start takes about **four minutes** — 40 s to join
-  the Tor network, then a few minutes for the two apps to find each other. That
-  is the price of needing no server. Measured, not estimated.
+- **It is not instant.** A cold start takes about **90 seconds** — roughly 35 s
+  to join the Tor network, then under a minute for the two apps to find each
+  other. That is the price of needing no server. Measured, not estimated.
 - **It does not protect a compromised device.** Plaintext is on both screens.
 - **The onion descriptor exists in Tor's directory for a few hours.** It is
   encrypted and cannot be enumerated, but "nothing exists anywhere" is not
