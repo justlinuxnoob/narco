@@ -68,6 +68,12 @@ jobs:
             require('fs').writeFileSync(f, JSON.stringify(j,null,2)+'\n');
             console.log('version set to', j.version);
           "
+          # The app logs its own CARGO_PKG_VERSION. Leaving it stale made a
+          # user's diagnostic log claim 0.5.0 while they ran the 0.5.2 build,
+          # which is exactly the wrong thing to be unsure about when reading it.
+          sed -i.bak -E "0,/^version = .*/s//version = \"$V\"/" app/src-tauri/Cargo.toml
+          rm -f app/src-tauri/Cargo.toml.bak
+          grep -m1 '^version' app/src-tauri/Cargo.toml
 
       # Ship the C tor daemon alongside the app. Narco drives this binary rather
       # than embedding a Tor library, because the library could not complete
@@ -100,7 +106,15 @@ jobs:
           # are only needed for censored networks and would add ~30 MB.
           tar xzf teb.tar.gz -C app/src-tauri/tor --strip-components=1 \
             --exclude='pluggable_transports' tor
+          # The geoip tables live in data/, not tor/. Without them tor warns on
+          # every start and cannot tell which country a relay is in, so it may
+          # build a path that never leaves one.
+          tar xzf teb.tar.gz -C app/src-tauri/tor --strip-components=1 \
+            data/geoip data/geoip6
           ls -la app/src-tauri/tor
+          # The daemon is the whole point of the bundle; if it is missing the
+          # build must fail here rather than ship an app that cannot start.
+          test -f "app/src-tauri/tor/tor$([ "${{ matrix.os }}" = windows-latest ] && echo .exe)"
 
       - name: Install frontend
         working-directory: app

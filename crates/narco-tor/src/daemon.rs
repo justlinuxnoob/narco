@@ -21,8 +21,12 @@ use tokio::process::{Child, Command};
 
 /// Give up on bootstrap rather than hang forever on a hostile network.
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(180);
-/// How long to wait for the daemon to write its port files at startup.
+/// How long to wait for the daemon to write its port and cookie files.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+/// How many of tor's own output lines to keep for error messages.
+const RECENT_LINES: usize = 12;
+/// Poll interval while waiting for those files.
+const STARTUP_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
 pub enum DaemonError {
@@ -37,7 +41,7 @@ pub enum DaemonError {
 impl std::fmt::Display for DaemonError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DaemonError::NotFound(p) => write!(f, "could not find the bundled tor binary ({p})"),
+            DaemonError::NotFound(p) => write!(f, "could not find the bundled tor binary: {p}"),
             DaemonError::Spawn(e) => write!(f, "could not start tor: {e}"),
             DaemonError::Control(e) => write!(f, "tor control connection failed: {e}"),
             DaemonError::Bootstrap(e) => write!(f, "could not connect to the Tor network: {e}"),
@@ -54,41 +58,75 @@ impl From<io::Error> for DaemonError {
     }
 }
 
+/// Strip Windows' `\\?\` extended-length prefix.
+///
+/// Tauri hands back resource paths carrying it. Rust copes, but the path goes
+/// on to a child process as a plain string, and tor has no reason to
+/// understand it. Verbatim paths also disable the `.` and `..` normalisation
+/// the rest of this function relies on.
+fn plain(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        // UNC (`\\?\UNC\server\share`) does not survive the naive strip.
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
 /// Locate the `tor` executable.
 ///
-/// Prefers a copy shipped beside our own executable (what the installers
-/// bundle), then falls back to one on `PATH` so a development checkout works
+/// Prefers a copy shipped beside our own executable (what the packaged builds
+/// carry), then falls back to one on `PATH` so a development checkout works
 /// without bundling.
+///
+/// Deliberately tries more places than should be necessary, and on failure
+/// reports every one of them. A user whose app cannot find its own daemon can
+/// only send us a log, so the log has to be enough on its own.
 pub fn find_tor_binary() -> Result<PathBuf, DaemonError> {
     let name = if cfg!(windows) { "tor.exe" } else { "tor" };
+    let mut tried = Vec::new();
 
+    let mut roots = Vec::new();
     // Set by the app to Tauri's resource directory, whose location differs per
     // platform and packaging format, so it cannot be guessed from here.
     if let Some(dir) = std::env::var_os("NARCO_TOR_DIR") {
-        let candidate = PathBuf::from(dir).join(name);
-        if candidate.is_file() {
-            return Ok(candidate);
+        let dir = plain(PathBuf::from(dir));
+        // The second entry covers a resource directory that already points at
+        // the tor folder, which would otherwise resolve to `tor/tor/tor.exe`.
+        roots.push(dir.clone());
+        roots.push(dir.join("tor"));
+        if let Some(parent) = dir.parent() {
+            roots.push(parent.to_path_buf());
         }
     }
-
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for candidate in [dir.join(name), dir.join("tor").join(name)] {
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-            }
+        if let Some(dir) = plain(exe).parent() {
+            roots.push(dir.to_path_buf());
+            roots.push(dir.join("tor"));
         }
     }
     if let Ok(path) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
+        roots.extend(std::env::split_paths(&path));
+    }
+
+    for root in roots {
+        let candidate = root.join(name);
+        if candidate.is_file() {
+            tracing::info!("using tor at {}", candidate.display());
+            return Ok(candidate);
+        }
+        if !tried.contains(&candidate) {
+            tried.push(candidate);
         }
     }
-    Err(DaemonError::NotFound(name.into()))
+
+    Err(DaemonError::NotFound(format!(
+        "{name}; looked in: {}",
+        tried
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 /// A running `tor` process plus an authenticated control connection.
@@ -110,16 +148,65 @@ impl TorDaemon {
         mut on_progress: impl FnMut(u8, &str),
     ) -> Result<Self, DaemonError> {
         let tor = find_tor_binary()?;
-        std::fs::create_dir_all(data_dir)?;
+
+        // tor refuses to start against a data directory it cannot make sense
+        // of, and does not repair one — a `state` that is not a file kills it
+        // outright. The directory holds nothing but cached network directories,
+        // so discarding it costs one slower connection and never a message.
+        if data_dir.exists() && !data_dir.join("state").is_file() && data_dir.join("state").exists()
+        {
+            tracing::warn!(
+                "discarding an unusable tor data directory at {}",
+                data_dir.display()
+            );
+            let _ = std::fs::remove_dir_all(data_dir);
+        }
+
+        std::fs::create_dir_all(data_dir).map_err(|e| {
+            DaemonError::Spawn(format!(
+                "could not create tor's data directory {}: {e}",
+                data_dir.display()
+            ))
+        })?;
 
         // Ports 0 make tor pick free ones and write them out, so several
         // instances can coexist and nothing collides with a system tor.
         let control_file = data_dir.join("control-port");
-        let socks_file = data_dir.join("socks-port");
+        let cookie_file = data_dir.join("control_auth_cookie");
+        // Stale files from a previous run would be read as this run's, giving a
+        // dead port and an authentication failure.
         let _ = std::fs::remove_file(&control_file);
-        let _ = std::fs::remove_file(&socks_file);
+        let _ = std::fs::remove_file(&cookie_file);
+
+        // An empty config file we own. Pointing `-f` at a path that does not
+        // exist works on Unix, but on Windows a bare "/nonexistent" names a
+        // path on the current drive that is not ours to assume anything about.
+        let torrc = data_dir.join("torrc");
+        std::fs::write(&torrc, b"")
+            .map_err(|e| DaemonError::Spawn(format!("could not write {}: {e}", torrc.display())))?;
 
         let mut cmd = Command::new(&tor);
+
+        // tor is a console program and Narco is a windowed one, so without this
+        // Windows opens a black console window and leaves it on screen for as
+        // long as the daemon runs.
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        // The geoip tables ship in the bundle's data/ directory; we place them
+        // beside the binary. tor runs without them but complains, and uses them
+        // to avoid building paths that stay within one country.
+        if let Some(dir) = tor.parent() {
+            for (option, name) in [("GeoIPFile", "geoip"), ("GeoIPv6File", "geoip6")] {
+                let path = dir.join(name);
+                if path.is_file() {
+                    cmd.args([option, &path.to_string_lossy()]);
+                }
+            }
+        }
 
         // The Tor bundle ships its own libssl/libcrypto/libevent beside the
         // binary. Without pointing the loader at them it picks up the system
@@ -138,8 +225,7 @@ impl TorDaemon {
         }
 
         let mut child = cmd
-            .arg("--ignore-missing-torrc")
-            .args(["-f", "/nonexistent"])
+            .args(["-f", &torrc.to_string_lossy()])
             .args(["DataDirectory", &data_dir.to_string_lossy()])
             .args(["SocksPort", "auto"])
             .args(["ControlPort", "auto"])
@@ -149,35 +235,60 @@ impl TorDaemon {
             // Quieter and faster: we never act as a relay or need IPv6-only.
             .args(["AvoidDiskWrites", "1"])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .stdin(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| DaemonError::Spawn(e.to_string()))?;
+            .map_err(|e| DaemonError::Spawn(format!("{e} (tried to run {})", tor.display())))?;
 
         // tor prints bootstrap lines on stdout; that is our progress source.
         let stdout = child.stdout.take().ok_or_else(|| {
             DaemonError::Spawn("tor produced no stdout to read progress from".into())
         })?;
 
-        let control_port = wait_for_control_port(&control_file).await?;
-        let cookie = std::fs::read(data_dir.join("control_auth_cookie"))?;
+        // Read tor's output from the moment it starts rather than from when
+        // the control port appears. Whatever kills it during startup — a
+        // locked data directory, a port it cannot open, a rejected option — it
+        // explains on the way out, and the old code only began reading at a
+        // point a dying tor never reaches. The one case that most needs an
+        // explanation was the one case that threw it away.
+        let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel();
+        let recent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        pump(stdout, false, recent.clone(), line_tx.clone());
+        if let Some(stderr) = child.stderr.take() {
+            pump(stderr, true, recent.clone(), line_tx.clone());
+        }
+        // The last sender, so the bootstrap loop sees the channel close when
+        // tor's output ends instead of waiting out the timeout.
+        drop(line_tx);
+
+        let control_port =
+            match wait_for_startup_file(&control_file, &mut child, "control port file").await {
+                Ok(bytes) => parse_control_port(&bytes)?,
+                Err(e) => return Err(with_tor_output(e, &recent).await),
+            };
+        let cookie =
+            match wait_for_startup_file(&cookie_file, &mut child, "authentication cookie").await {
+                Ok(bytes) => bytes,
+                Err(e) => return Err(with_tor_output(e, &recent).await),
+            };
 
         let mut control = TcpStream::connect(("127.0.0.1", control_port))
             .await
-            .map_err(|e| DaemonError::Control(e.to_string()))?;
+            .map_err(|e| {
+                DaemonError::Control(format!("could not reach tor on port {control_port}: {e}"))
+            })?;
         authenticate(&mut control, &cookie).await?;
 
         let socks_port = read_socks_port(&mut control).await?;
 
-        // Follow bootstrap on stdout until done or the deadline passes.
-        let mut lines = BufReader::new(stdout).lines();
+        // Follow bootstrap on tor's output until done or the deadline passes.
         let deadline = tokio::time::Instant::now() + BOOTSTRAP_TIMEOUT;
         let mut percent = 0u8;
         loop {
-            let next = tokio::time::timeout_at(deadline, lines.next_line()).await;
+            let next = tokio::time::timeout_at(deadline, line_rx.recv()).await;
             match next {
-                Ok(Ok(Some(line))) => {
+                Ok(Some(line)) => {
                     if let Some((pct, summary)) = parse_bootstrap(&line) {
                         percent = pct;
                         on_progress(pct, summary);
@@ -186,13 +297,14 @@ impl TorDaemon {
                         }
                     }
                 }
-                // tor exited, or its stdout closed.
-                Ok(Ok(None)) => {
-                    return Err(DaemonError::Bootstrap(
-                        "tor stopped unexpectedly during startup".into(),
-                    ))
+                // tor exited, or its output closed.
+                Ok(None) => {
+                    return Err(with_tor_output(
+                        DaemonError::Bootstrap("tor stopped unexpectedly".into()),
+                        &recent,
+                    )
+                    .await)
                 }
-                Ok(Err(e)) => return Err(DaemonError::Bootstrap(e.to_string())),
                 Err(_) => {
                     return Err(DaemonError::Bootstrap(format!(
                         "stalled at {percent}% after {}s. Antivirus or firewall software \
@@ -295,27 +407,118 @@ fn parse_bootstrap(line: &str) -> Option<(u8, &str)> {
     Some((pct, summary))
 }
 
-/// tor writes `PORT=127.0.0.1:9051` once the control port is open.
-async fn wait_for_control_port(path: &Path) -> Result<u16, DaemonError> {
-    let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
-    loop {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            if let Some(port) = text
-                .trim()
-                .rsplit(':')
-                .next()
-                .and_then(|p| p.trim().parse::<u16>().ok())
-            {
-                return Ok(port);
+/// Forward one of tor's output streams to the log, to a rolling buffer for
+/// error messages, and to the bootstrap loop.
+fn pump<R>(
+    reader: R,
+    is_stderr: bool,
+    recent: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if is_stderr {
+                tracing::warn!("tor: {line}");
+            } else {
+                tracing::debug!("tor: {line}");
             }
+            if let Ok(mut r) = recent.lock() {
+                if r.len() == RECENT_LINES {
+                    r.remove(0);
+                }
+                r.push(line.clone());
+            }
+            let _ = tx.send(line);
+        }
+    });
+}
+
+/// Attach tor's last words to a failure. Its own output is the only place the
+/// real reason appears, and a user who hits this can send us nothing else.
+async fn with_tor_output(
+    error: DaemonError,
+    recent: &std::sync::Mutex<Vec<String>>,
+) -> DaemonError {
+    // Let the readers drain what tor wrote on its way out; the pipe closing and
+    // the process exiting are not the same instant.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let tail = match recent.lock() {
+        Ok(r) if !r.is_empty() => r.join(" | "),
+        _ => return error,
+    };
+    match error {
+        DaemonError::Spawn(m) => DaemonError::Spawn(format!("{m}. tor said: {tail}")),
+        DaemonError::Bootstrap(m) => DaemonError::Bootstrap(format!("{m}. tor said: {tail}")),
+        other => other,
+    }
+}
+
+/// Wait for one of the files tor writes at startup and return its contents.
+///
+/// tor writes its control-port file and its authentication cookie at separate
+/// moments, so reading one the instant the other appears is a race. It is a
+/// race Linux nearly always wins and Windows often loses, because antivirus
+/// software inspects each write and widens the gap — losing it surfaced as a
+/// bare "The system cannot find the file specified. (os error 2)" seconds after
+/// launch, with nothing to say which file was missing.
+///
+/// Requiring the length to hold steady across two polls avoids the other half
+/// of the problem: the file exists between being created and being written, and
+/// a cookie read at that instant would authenticate with the wrong bytes.
+///
+/// Also watches the child, so a tor that dies immediately is reported as having
+/// died rather than as a timeout thirty seconds later.
+async fn wait_for_startup_file(
+    path: &Path,
+    child: &mut Child,
+    what: &str,
+) -> Result<Vec<u8>, DaemonError> {
+    let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+    let mut settled: Option<usize> = None;
+    loop {
+        match std::fs::read(path) {
+            Ok(bytes) if !bytes.is_empty() => {
+                if settled == Some(bytes.len()) {
+                    return Ok(bytes);
+                }
+                settled = Some(bytes.len());
+            }
+            _ => settled = None,
+        }
+
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(DaemonError::Spawn(format!(
+                "tor exited ({status}) before writing its {what}"
+            )));
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(DaemonError::Spawn(
-                "tor did not report a control port; it may have failed to start".into(),
-            ));
+            return Err(DaemonError::Spawn(format!(
+                "tor did not write its {what} ({}) within {}s. Antivirus software \
+                 blocking the bundled tor is the usual cause.",
+                path.display(),
+                STARTUP_TIMEOUT.as_secs()
+            )));
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(STARTUP_POLL).await;
     }
+}
+
+/// tor writes `PORT=127.0.0.1:9051` once the control port is open.
+fn parse_control_port(bytes: &[u8]) -> Result<u16, DaemonError> {
+    let text = String::from_utf8_lossy(bytes);
+    text.trim()
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.trim().parse::<u16>().ok())
+        .ok_or_else(|| {
+            DaemonError::Spawn(format!(
+                "could not read tor's control port from {:?}",
+                text.trim()
+            ))
+        })
 }
 
 async fn authenticate(control: &mut TcpStream, cookie: &[u8]) -> Result<(), DaemonError> {
@@ -397,5 +600,79 @@ mod tests {
     fn ignores_unrelated_lines() {
         assert!(parse_bootstrap("[notice] Opening Socks listener").is_none());
         assert!(parse_bootstrap("250 OK").is_none());
+    }
+
+    #[test]
+    fn reads_the_control_port_tor_writes() {
+        assert_eq!(parse_control_port(b"PORT=127.0.0.1:9051\n").unwrap(), 9051);
+        assert_eq!(parse_control_port(b"PORT=127.0.0.1:41337").unwrap(), 41337);
+        assert!(parse_control_port(b"").is_err());
+        assert!(parse_control_port(b"PORT=127.0.0.1:").is_err());
+    }
+
+    /// The Windows failure: the cookie arrives after the port file, and reading
+    /// it too eagerly gave "the system cannot find the file specified".
+    #[tokio::test]
+    async fn waits_for_a_file_that_appears_late() {
+        let dir = std::env::temp_dir().join(format!("narco-late-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("control_auth_cookie");
+        let _ = std::fs::remove_file(&path);
+
+        let writer = {
+            let path = path.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                std::fs::write(&path, [7u8; 32]).unwrap();
+            })
+        };
+
+        // A child that outlives the wait, so only the file gates the result.
+        let mut child = Command::new(if cfg!(windows) { "cmd" } else { "sleep" })
+            .args(if cfg!(windows) {
+                vec!["/c", "timeout", "/t", "5"]
+            } else {
+                vec!["5"]
+            })
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+
+        let bytes = wait_for_startup_file(&path, &mut child, "cookie")
+            .await
+            .unwrap();
+        assert_eq!(bytes, [7u8; 32]);
+        writer.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tor killed by antivirus should say so, not time out silently.
+    #[tokio::test]
+    async fn reports_a_daemon_that_dies_instead_of_timing_out() {
+        let mut child = Command::new(if cfg!(windows) { "cmd" } else { "true" })
+            .args(if cfg!(windows) {
+                vec!["/c", "exit"]
+            } else {
+                vec![]
+            })
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let missing = std::env::temp_dir().join("narco-nonexistent-startup-file");
+        let _ = std::fs::remove_file(&missing);
+
+        let err = wait_for_startup_file(&missing, &mut child, "control port file")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("exited"),
+            "expected an exit report, got: {err}"
+        );
     }
 }

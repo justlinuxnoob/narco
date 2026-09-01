@@ -287,6 +287,12 @@ async fn socks5_connect(
 
 /// A data directory owned by this app, so it can be cleared safely and holds
 /// only Tor's own state — never a room code, key, or message.
+///
+/// Named `tor-daemon` rather than `tor` because versions up to 0.4.x ran Arti,
+/// which used `tor` for a directory laid out incompatibly: `state` and `cache`
+/// are directories there, and the daemon expects `state` to be a file. Pointing
+/// the daemon at one killed it on startup — "State file is not a file? Failing"
+/// — on every machine that had ever run an older Narco, and on no other.
 fn app_tor_dir() -> std::path::PathBuf {
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
@@ -297,9 +303,17 @@ fn app_tor_dir() -> std::path::PathBuf {
                 std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache"))
             })
     };
-    base.unwrap_or_else(std::env::temp_dir)
-        .join("narco")
-        .join("tor")
+    let base = base.unwrap_or_else(std::env::temp_dir).join("narco");
+
+    // That old directory is now dead weight on an upgraded machine, and this
+    // app promises to leave nothing behind. Only remove one with Arti's shape,
+    // so a directory we did not write is never touched.
+    let legacy = base.join("tor");
+    if legacy.join("state").is_dir() {
+        let _ = std::fs::remove_dir_all(&legacy);
+    }
+
+    base.join("tor-daemon")
 }
 
 #[cfg(test)]
