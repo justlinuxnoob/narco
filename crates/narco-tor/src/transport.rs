@@ -61,6 +61,11 @@ const VIRTUAL_PORT: u16 = 9001;
 /// short timeout gives up while the handshake is still working.
 const ROUND_TIMEOUT: Duration = Duration::from_secs(240);
 
+/// Give up on joining Tor and report it, rather than sitting on the connecting
+/// screen forever. On a working network this takes ~20-40s; a network that
+/// blocks Tor otherwise hangs with no explanation and no way to retry.
+const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(150);
+
 /// Pause between dial attempts within a round. The peer may not have published
 /// yet, so early failures are expected rather than fatal.
 const DIAL_RETRY: Duration = Duration::from_secs(4);

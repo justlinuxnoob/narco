@@ -15,7 +15,7 @@ type UiEvent =
   | { kind: "ready" }
   | { kind: "message"; text: string }
   | { kind: "ended"; reason: string }
-  | { kind: "torProgress"; text: string; ready: boolean };
+  | { kind: "torProgress"; text: string; ready: boolean; failed: boolean };
 
 const $ = <T extends HTMLElement>(id: string) => {
   const el = document.getElementById(id);
@@ -136,7 +136,14 @@ $("add").addEventListener("click", () => addSecret(true));
 // Join Tor immediately, without waiting for secrets — it needs none. This hides
 // the slowest stage behind the time spent typing and sharing a code, and the
 // client stays alive so a second chat skips it entirely.
-invoke("warm_tor").catch(() => {});
+const warmTor = () => {
+  $("tor-retry").hidden = true;
+  $("tor-state").textContent = "joining tor…";
+  $("tor-state").classList.remove("ready", "failed");
+  invoke("warm_tor").catch(() => {});
+};
+warmTor();
+$("tor-retry").addEventListener("click", warmTor);
 
 // --- connecting progress --------------------------------------------------
 
@@ -310,8 +317,16 @@ listen<UiEvent>("narco", ({ payload }) => {
     case "torProgress": {
       $("tor-state").textContent = payload.ready ? "tor ready" : payload.text;
       $("tor-state").classList.toggle("ready", payload.ready);
-      // Already connected to Tor, so skip straight to the publishing stage.
-      if (payload.ready) setStage("publish");
+      $("tor-state").classList.toggle("failed", payload.failed);
+      // A failed bootstrap must be recoverable without restarting the app.
+      $("tor-retry").hidden = !payload.failed;
+      if (payload.failed) {
+        // If the user already pressed start, take them off the connecting
+        // screen rather than leaving them watching a dead clock.
+        if (!screens.connecting.classList.contains("hidden")) endWith(payload.text);
+      } else if (payload.ready) {
+        setStage("publish");
+      }
       break;
     }
   }

@@ -34,7 +34,11 @@ enum UiEvent {
     /// Session over. `reason` is shown to the user.
     Ended { reason: String },
     /// Progress joining Tor, reported while the user is still typing.
-    TorProgress { text: String, ready: bool },
+    TorProgress {
+        text: String,
+        ready: bool,
+        failed: bool,
+    },
 }
 
 #[derive(Default)]
@@ -97,22 +101,50 @@ async fn ensure_tor(
             let a = app.clone();
             TorTransport::bootstrap(move |s| {
                 let (text, _) = status_parts(s);
-                emit(&a, UiEvent::TorProgress { text, ready: false });
+                emit(
+                    &a,
+                    UiEvent::TorProgress {
+                        text,
+                        ready: false,
+                        failed: false,
+                    },
+                );
             })
             .await
             .map(Arc::new)
             .map_err(|e| e.to_string())
         })
         .await
-        .cloned()?;
-    emit(
-        app,
-        UiEvent::TorProgress {
-            text: "Tor ready".into(),
-            ready: true,
-        },
-    );
-    Ok(out)
+        .cloned();
+
+    match out {
+        Ok(t) => {
+            emit(
+                app,
+                UiEvent::TorProgress {
+                    text: "Tor ready".into(),
+                    ready: true,
+                    failed: false,
+                },
+            );
+            Ok(t)
+        }
+        Err(e) => {
+            // Surface the failure instead of swallowing it — this is what left
+            // the entry screen stuck on "joining tor…" with no way out.
+            // `get_or_try_init` does not cache errors, so retry works without
+            // restarting the app.
+            emit(
+                app,
+                UiEvent::TorProgress {
+                    text: e.clone(),
+                    ready: false,
+                    failed: true,
+                },
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Start joining Tor without waiting for it. Called at launch.
