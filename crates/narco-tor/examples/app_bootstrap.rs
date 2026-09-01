@@ -13,8 +13,26 @@ use std::time::Instant;
 
 #[tokio::main]
 async fn main() {
+    // Arti's own logs, which is what actually explains a stall. Override with
+    // RUST_LOG for more or less detail.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new(
+                    "info,tor_dirmgr=debug,tor_guardmgr=debug,tor_chanmgr=debug,tor_circmgr=debug",
+                )
+            }),
+        )
+        .with_ansi(false)
+        .init();
+
     let started = Instant::now();
-    println!("calling TorTransport::bootstrap() — the app's exact path\n");
+    println!("narco tor diagnostic — testing the app's exact bootstrap path");
+    println!(
+        "os: {}  arch: {}\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
 
     let result = TorTransport::bootstrap(|s| match s {
         Status::BootstrappingTor { percent } => {
