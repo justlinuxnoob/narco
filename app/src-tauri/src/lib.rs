@@ -54,22 +54,88 @@ struct AppState {
     tor: Arc<tokio::sync::OnceCell<Arc<TorTransport>>>,
 }
 
+/// Recent log lines, shown in the app's Diagnostics panel.
+///
+/// The release build has no console (a GUI app on Windows gets no stdout), so
+/// without this the user can see a failure but never the reason. Capped so it
+/// cannot grow without bound.
+const MAX_LOG_LINES: usize = 500;
+static LOG_BUF: std::sync::OnceLock<Mutex<std::collections::VecDeque<String>>> =
+    std::sync::OnceLock::new();
+
+fn log_buf() -> &'static Mutex<std::collections::VecDeque<String>> {
+    LOG_BUF.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
+}
+
+fn push_log(line: &str) {
+    let line = line.trim_end();
+    if line.is_empty() {
+        return;
+    }
+    let mut b = log_buf().lock().expect("log buffer poisoned");
+    if b.len() >= MAX_LOG_LINES {
+        b.pop_front();
+    }
+    b.push_back(line.to_string());
+}
+
+/// Sink that routes `tracing` output (including Arti's internals) into the
+/// in-app buffer, so the Diagnostics panel shows the real cause of a failure.
+struct LogWriter;
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        for line in String::from_utf8_lossy(buf).lines() {
+            push_log(line);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct LogWriterMaker;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriterMaker {
+    type Writer = LogWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        LogWriter
+    }
+}
+
+/// Everything the Diagnostics panel shows. Safe to share: it carries no room
+/// code, onion address, key, or message content.
+#[tauri::command]
+fn get_logs() -> String {
+    let b = log_buf().lock().expect("log buffer poisoned");
+    if b.is_empty() {
+        return "(no logs yet)".into();
+    }
+    b.iter().cloned().collect::<Vec<_>>().join("\n")
+}
+
 fn emit(app: &AppHandle, e: UiEvent) {
-    // Log connection status to stderr for troubleshooting. Deliberately safe to
-    // log: it carries no room code, onion address, key, or message content —
-    // only coarse connection state.
-    match &e {
-        UiEvent::Status { text, stage } => eprintln!("[narco] status[{stage}] {text}"),
-        UiEvent::Ready => eprintln!("[narco] handshake confirmed — chat live"),
-        UiEvent::Ended { reason } => eprintln!("[narco] ended: {reason}"),
+    // Record connection status for troubleshooting. Deliberately safe to log:
+    // it carries no room code, onion address, key, or message content — only
+    // coarse connection state.
+    let line = match &e {
+        UiEvent::Status { text, stage } => Some(format!("[narco] status[{stage}] {text}")),
+        UiEvent::Ready => Some("[narco] handshake confirmed — chat live".to_string()),
+        UiEvent::Ended { reason } => Some(format!("[narco] ended: {reason}")),
         UiEvent::TorProgress {
             text,
             ready,
             failed,
-        } => {
-            eprintln!("[narco] tor: {text} (ready={ready} failed={failed})")
-        }
-        UiEvent::Message { .. } => {} // never log message events
+        } => Some(format!(
+            "[narco] tor: {text} (ready={ready} failed={failed})"
+        )),
+        UiEvent::Message { .. } => None, // never log message events
+    };
+    if let Some(line) = line {
+        eprintln!("{line}");
+        push_log(&line);
     }
     let _ = app.emit("narco", e);
 }
@@ -366,11 +432,30 @@ pub fn run() {
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
     }
 
+    // Capture our logs AND Arti's into the in-app Diagnostics panel. Without
+    // this a failure is invisible in a release build, which has no console.
+    // Tor's directory and guard managers are raised to debug because that is
+    // where bootstrap actually stalls.
+    let filter = tracing_subscriber::EnvFilter::new(
+        "info,tor_dirmgr=debug,tor_guardmgr=debug,tor_circmgr=debug,arti_client=debug",
+    );
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(LogWriterMaker)
+        .with_ansi(false)
+        .try_init();
+    push_log(&format!(
+        "[narco] narco {} starting on {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS
+    ));
+
     tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             generate_code,
             check_code,
+            get_logs,
             warm_tor,
             connect,
             send,

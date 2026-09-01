@@ -26,6 +26,16 @@ const SNOWFLAKE: &[&str] = &[
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Arti's own logs are the only way to see why a bridge attempt stalls:
+    // ptmgr shows whether the transport binary launched, guardmgr/bridgedesc
+    // whether the bridge answered, dirmgr whether the directory came through.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "warn,tor_ptmgr=trace,tor_guardmgr=debug,tor_dirmgr=debug,tor_chanmgr=debug",
+        ))
+        .with_ansi(false)
+        .init();
+
     let lyrebird = std::env::args()
         .nth(1)
         .expect("usage: bridge_test <path-to-lyrebird> [obfs4|snowflake]");

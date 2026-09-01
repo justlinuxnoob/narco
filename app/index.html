@@ -64,6 +64,19 @@
       </p>
 
       <p class="error" id="entry-error" role="alert"></p>
+
+      <details id="diag">
+        <summary>diagnostics</summary>
+        <p class="hint">
+          What the app and Tor actually did. Contains no code, address, key or
+          message — safe to share when reporting a problem.
+        </p>
+        <div class="row">
+          <button id="diag-refresh" class="ghost small" type="button">refresh</button>
+          <button id="diag-copy" class="ghost small" type="button">copy logs</button>
+        </div>
+        <pre id="diag-log">(open to load)</pre>
+      </details>
     </main>
 
     <!-- Connecting -->
@@ -138,7 +151,9 @@
       </p>
       <div class="row">
         <button id="again" type="button">start over</button>
+        <button id="ended-diag" class="ghost" type="button">show logs</button>
       </div>
+      <pre id="ended-log" hidden></pre>
     </main>
 
     <script type="module" src="/src/main.ts"></script>

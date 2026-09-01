@@ -332,6 +332,39 @@ $("again").addEventListener("click", () => {
   show("entry");
 });
 
+// --- diagnostics ----------------------------------------------------------
+
+/** Pull the in-app log buffer (app + Tor internals) into an element. */
+async function loadLogs(into: HTMLElement) {
+  try {
+    into.textContent = await invoke<string>("get_logs");
+  } catch (e) {
+    into.textContent = `could not read logs: ${e}`;
+  }
+}
+
+const diag = $<HTMLDetailsElement>("diag");
+diag.addEventListener("toggle", () => {
+  if (diag.open) loadLogs($("diag-log"));
+});
+$("diag-refresh").addEventListener("click", () => loadLogs($("diag-log")));
+$("diag-copy").addEventListener("click", async () => {
+  await loadLogs($("diag-log"));
+  try {
+    await navigator.clipboard.writeText($("diag-log").textContent ?? "");
+    flash($<HTMLButtonElement>("diag-copy"), "copied");
+  } catch {
+    // Clipboard can be unavailable; the text is on screen to select by hand.
+  }
+});
+
+// The ended screen is where failures land, so surface the logs there too.
+$("ended-diag").addEventListener("click", async () => {
+  const pre = $("ended-log");
+  pre.hidden = !pre.hidden;
+  if (!pre.hidden) await loadLogs(pre);
+});
+
 // --- events from Rust -----------------------------------------------------
 
 listen<UiEvent>("narco", ({ payload }) => {
