@@ -213,9 +213,16 @@ async function start(host: boolean) {
   setStage("tor");
 
   // The host shares the code, so keep it visible on the connecting screen.
+  // Show ALL secrets: the address derives from every one, so the joiner must
+  // enter them all, in order. (This previously showed only the first, so a
+  // multi-secret host published at an address the joiner could never derive —
+  // which looked like "2+ secrets don't connect".)
   const share = $("share");
   if (host) {
-    $("share-code").textContent = secrets[0];
+    $("share-code").textContent =
+      secrets.length === 1
+        ? secrets[0]
+        : secrets.map((s, i) => `${i + 1}. ${s}`).join("\n");
     share.hidden = false;
   } else {
     share.hidden = true;

@@ -426,6 +426,7 @@ button.icon:hover:not(:disabled) {
   flex: 1;
   font-size: 13px;
   word-break: break-all;
+  white-space: pre-wrap; /* render each secret on its own line */
   border: 1px solid var(--ink);
   border-radius: var(--radius);
   padding: 8px 10px;
