@@ -70,8 +70,6 @@ jobs:
       # must travel with it.
       - name: Fetch Tor Expert Bundle
         shell: bash
-        env:
-          TOR_VERSION: "15.0.20"
         run: |
           set -euo pipefail
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
@@ -79,6 +77,15 @@ jobs:
           else
             PLATFORM="linux-x86_64"
           fi
+
+          # Resolve the current version rather than pinning one. dist.torproject
+          # .org keeps only recent releases, so a hardcoded version 404s as soon
+          # as Tor ships an update — which happened mid-development.
+          TOR_VERSION="$(curl -fsSL --retry 3 \
+            https://aus1.torproject.org/torbrowser/update_3/release/downloads.json \
+            | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).version))")"
+          echo "tor version: $TOR_VERSION"
+
           URL="https://dist.torproject.org/torbrowser/${TOR_VERSION}/tor-expert-bundle-${PLATFORM}-${TOR_VERSION}.tar.gz"
           echo "downloading $URL"
           curl -fsSL --retry 3 -o teb.tar.gz "$URL"
