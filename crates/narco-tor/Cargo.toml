@@ -21,6 +21,12 @@ arti-client = { version = "0.45", default-features = false, features = [
     "experimental-api",
     "keymgr",
     "ephemeral-keystore",
+    # Compile SQLite from source rather than linking a system library. Arti's
+    # directory cache needs it, and Windows has no system sqlite3 to link
+    # against — without this the Windows build fails at link time with
+    # LNK1181. Enabled on every platform so builds do not vary with whatever
+    # SQLite happens to be installed.
+    "static-sqlite",
 ] }
 tor-hscrypto = "0.45"
 tor-hsservice = "0.45"
