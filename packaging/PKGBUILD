@@ -12,7 +12,9 @@
 
 pkgname=narco-bin
 _pkgname=narco
-pkgver=0.1.1
+# Keep in step with the latest GitHub release tag; the source URL below is
+# built from it. A mismatch here yields a 404 at download time.
+pkgver=0.3.5
 pkgrel=1
 pkgdesc="Private chat for two people. No accounts, no server, no history."
 arch=('x86_64')
@@ -26,7 +28,10 @@ conflicts=("$_pkgname")
 options=('!strip')
 
 source=("$_pkgname-$pkgver.AppImage::$url/releases/download/v$pkgver/Narco_${pkgver}_amd64.AppImage")
-# Replaced on each release. Verify against the published checksum before trusting.
+# 'SKIP' disables verification — acceptable only because you can (and for a
+# security tool, should) replace it with the real hash of the published
+# AppImage: `updpkgsums`, or `sha256sum Narco_<ver>_amd64.AppImage`. Left as
+# SKIP here so the template builds before a release is cut.
 sha256sums=('SKIP')
 
 prepare() {

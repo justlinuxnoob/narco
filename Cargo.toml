@@ -1,0 +1,20 @@
+# Virtual workspace root.
+#
+# Without this, `cargo run -p narco-tor --example …` (as the README shows) fails
+# with "could not find Cargo.toml", because there is no root manifest to resolve
+# `-p` against. Listing the members fixes that and lets every crate be built
+# from the repository root.
+#
+# The Tauri app is intentionally excluded: it pulls in the full desktop
+# toolchain and is built via its own `npm run tauri` flow, so keeping it out of
+# the workspace keeps `cargo test` at the root fast and dependency-light.
+[workspace]
+resolver = "2"
+members = [
+    "crates/narco-proto",
+    "crates/narco-tor",
+    "server",
+]
+exclude = [
+    "app/src-tauri",
+]

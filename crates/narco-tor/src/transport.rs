@@ -383,10 +383,15 @@ impl TorTransport {
             Role::Host => {
                 on_status(Status::PublishingService);
 
-                // A fresh nickname per round: `launch_onion_service_with_hsid`
-                // refuses to overwrite an existing key for a nickname, and a
-                // round may retry.
-                let nickname = HsNickname::new(format!("narco{round}"))
+                // Process-unique nickname. `round` alone is not enough: a caller
+                // that reuses one TorTransport across separate connects (as the
+                // app does) passes round=0 each time and would collide on the
+                // keystore. The shared LAUNCH_COUNTER guarantees uniqueness
+                // across every launch in the process. `round` is unused now but
+                // kept in the signature for the tests that drive this directly.
+                let _ = round;
+                let n = LAUNCH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let nickname = HsNickname::new(format!("narco{n}"))
                     .map_err(|e| TorError::Config(e.to_string()))?;
                 let svc_config = OnionServiceConfigBuilder::default()
                     .nickname(nickname)
