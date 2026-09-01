@@ -285,9 +285,25 @@ impl TorTransport {
                         }
                     }
                     _ = tokio::time::sleep_until(deadline) => {
+                        // Arti's progress is conn_frac*0.15 + dir_frac*0.85, so
+                        // stalling at exactly 15% means the connection to Tor
+                        // succeeded and the *directory* never advanced at all.
+                        // That is not censorship (a block fails below 15%); by
+                        // far the most common cause is a wrong system clock,
+                        // because Tor rejects a consensus that is not valid for
+                        // the current time. Say so instead of blaming the
+                        // network.
+                        let hint = if percent >= 14 && percent <= 16 {
+                            "Reached the Tor network but could not load its directory. \
+                             This is almost always a wrong system clock — check that \
+                             your device's date, time and time zone are correct \
+                             (enable automatic time) and try again."
+                        } else {
+                            "Could not reach the Tor network. This network may be \
+                             blocking Tor — try a phone hotspot or a VPN."
+                        };
                         return Err(TorError::Bootstrap(format!(
-                            "could not reach the Tor network after {}s (stuck at {percent}%). \
-                             This network is probably blocking Tor — try a phone hotspot or a VPN.",
+                            "{hint} (stopped at {percent}% after {}s)",
                             BOOTSTRAP_TIMEOUT.as_secs()
                         )));
                     }
