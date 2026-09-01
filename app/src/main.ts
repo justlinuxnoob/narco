@@ -140,6 +140,7 @@ const warmTor = () => {
   $("tor-retry").hidden = true;
   $("tor-state").textContent = "joining tor…";
   $("tor-state").classList.remove("ready", "failed");
+  setStartReady(false);
   invoke("warm_tor").catch(() => {});
 };
 $("tor-retry").addEventListener("click", warmTor);
@@ -220,7 +221,18 @@ async function start() {
   }
 }
 
-$("start").addEventListener("click", start);
+// Start is disabled until Tor is ready — pressing it earlier would just wait
+// on a connection that hasn't happened yet, which looks broken.
+const startBtn = $<HTMLButtonElement>("start");
+startBtn.disabled = true;
+startBtn.textContent = "connecting to tor…";
+startBtn.addEventListener("click", start);
+
+/** Reflect Tor readiness on the start button. */
+function setStartReady(ready: boolean) {
+  startBtn.disabled = !ready;
+  startBtn.textContent = ready ? "start" : "connecting to tor…";
+}
 
 $("cancel").addEventListener("click", async () => {
   await invoke("end_session");
@@ -319,6 +331,8 @@ listen<UiEvent>("narco", ({ payload }) => {
       $("tor-state").textContent = payload.ready ? "tor ready" : payload.text;
       $("tor-state").classList.toggle("ready", payload.ready);
       $("tor-state").classList.toggle("failed", payload.failed);
+      // Only allow starting once Tor is actually up.
+      setStartReady(payload.ready);
       // A failed bootstrap must be recoverable without restarting the app.
       $("tor-retry").hidden = !payload.failed;
       if (payload.failed) {

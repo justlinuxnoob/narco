@@ -55,6 +55,22 @@ struct AppState {
 }
 
 fn emit(app: &AppHandle, e: UiEvent) {
+    // Log connection status to stderr for troubleshooting. Deliberately safe to
+    // log: it carries no room code, onion address, key, or message content —
+    // only coarse connection state.
+    match &e {
+        UiEvent::Status { text, stage } => eprintln!("[narco] status[{stage}] {text}"),
+        UiEvent::Ready => eprintln!("[narco] handshake confirmed — chat live"),
+        UiEvent::Ended { reason } => eprintln!("[narco] ended: {reason}"),
+        UiEvent::TorProgress {
+            text,
+            ready,
+            failed,
+        } => {
+            eprintln!("[narco] tor: {text} (ready={ready} failed={failed})")
+        }
+        UiEvent::Message { .. } => {} // never log message events
+    }
     let _ = app.emit("narco", e);
 }
 
