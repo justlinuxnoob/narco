@@ -53,6 +53,10 @@ use tor_rtcompat::PreferredRuntime;
 /// space, so the value is arbitrary and never appears on the real network.
 const VIRTUAL_PORT: u16 = 9001;
 
+/// Ever-increasing so each onion service launch gets a unique nickname within
+/// the process. See the launch site for why reuse is a bug.
+static LAUNCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// How long to give one round before re-flipping the coin.
 ///
 /// Measured, not guessed: publishing an onion descriptor requires building
@@ -298,8 +302,16 @@ impl TorTransport {
 
         on_status(Status::PublishingService);
 
+        // A unique nickname per launch. `launch_onion_service_with_hsid`
+        // inserts the key with overwrite=false, so reusing a nickname on a
+        // second attempt (e.g. after a disconnect, since the Tor client and its
+        // ephemeral keystore are kept alive for speed) fails with
+        // KeyAlreadyExists — surfaced as a "bad api usage / keystore" error.
+        // The nickname is only a local label; the onion address comes from the
+        // keypair, so varying it changes nothing a peer can see.
+        let n = LAUNCH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nickname =
-            HsNickname::new("narco".to_string()).map_err(|e| TorError::Config(e.to_string()))?;
+            HsNickname::new(format!("narco{n}")).map_err(|e| TorError::Config(e.to_string()))?;
         let svc_config = OnionServiceConfigBuilder::default()
             .nickname(nickname)
             .build()
