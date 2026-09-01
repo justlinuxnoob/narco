@@ -426,18 +426,46 @@ pub fn run() {
     // e.g. Fedora). Forcing it off costs a little GPU acceleration and fixes the
     // blank screen. Must be set before the webview initialises. `set_var` is
     // safe on edition 2021.
+    // WebKitGTK's default DMABUF/compositing path renders a blank white window
+    // on many Linux setups (Nvidia, some Wayland/Fedora configurations).
+    //
+    // Setting these from inside `main` is too late: WebKitGTK reads them when
+    // its shared library is loaded, which happens before `main` runs. So the
+    // process re-executes itself once with the variables present. The guard
+    // variable makes this strictly one extra exec, never a loop.
     #[cfg(target_os = "linux")]
     {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        const GUARD: &str = "NARCO_WEBKIT_ENV_SET";
+        if std::env::var_os(GUARD).is_none() {
+            use std::os::unix::process::CommandExt;
+            let exe = std::env::current_exe();
+            if let Ok(exe) = exe {
+                let err = std::process::Command::new(exe)
+                    .args(std::env::args_os().skip(1))
+                    .env(GUARD, "1")
+                    .env("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+                    .env("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
+                    .exec();
+                // `exec` only returns on failure; carry on unreplaced rather
+                // than refusing to start.
+                eprintln!("[narco] could not re-exec with WebKit env: {err}");
+            }
+        }
     }
 
     // Capture our logs AND Arti's into the in-app Diagnostics panel. Without
     // this a failure is invisible in a release build, which has no console.
     // Tor's directory and guard managers are raised to debug because that is
     // where bootstrap actually stalls.
+    // Includes the layers that actually move bytes — chanmgr (TCP/TLS to
+    // relays), dirclient (the directory fetch itself), proto and netdir. A
+    // narrower filter left the real failure invisible: a Windows report showed
+    // "connecting successfully; directory is fetching a consensus" and then
+    // silence, because the fetching layers were not being logged.
     let filter = tracing_subscriber::EnvFilter::new(
-        "info,tor_dirmgr=debug,tor_guardmgr=debug,tor_circmgr=debug,arti_client=debug",
+        "info,tor_dirmgr=debug,tor_guardmgr=debug,tor_circmgr=debug,arti_client=debug,\
+         tor_chanmgr=debug,tor_dirclient=debug,tor_proto=debug,tor_netdir=debug,\
+         tor_rtcompat=debug",
     );
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
