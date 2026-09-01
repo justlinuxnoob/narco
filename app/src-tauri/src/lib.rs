@@ -355,6 +355,17 @@ fn end_session(state: State<'_, AppState>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK's default DMABUF/compositing rendering path draws a blank white
+    // window on a lot of Linux setups (common with Nvidia and under Wayland,
+    // e.g. Fedora). Forcing it off costs a little GPU acceleration and fixes the
+    // blank screen. Must be set before the webview initialises. `set_var` is
+    // safe on edition 2021.
+    #[cfg(target_os = "linux")]
+    {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    }
+
     tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
