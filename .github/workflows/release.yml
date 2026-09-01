@@ -106,10 +106,39 @@ jobs:
         working-directory: app
         run: npm ci
 
-      - name: Build (Linux → AppImage)
+      # Not an AppImage: linuxdeploy inspects every bundled binary and tries to
+      # resolve its libraries, and it fails on the tor daemon's bundled
+      # libssl/libcrypto/libevent ("failed to run linuxdeploy"). Reproduced both
+      # in CI and locally, and only since tor was bundled. A portable tarball
+      # sidesteps the bundler entirely and matches the Windows layout.
+      - name: Build (Linux → executable only)
         if: matrix.os == 'ubuntu-22.04'
         working-directory: app
-        run: npm run tauri build -- --bundles appimage
+        run: npm run tauri build -- --no-bundle
+
+      - name: Package portable Linux tarball
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${{ github.event.inputs.tag || github.ref_name }}"; V="${V#v}"
+          STAGE="Narco_${V}_linux_portable"
+          mkdir -p "portable/$STAGE"
+          cp app/src-tauri/target/release/narco-app "portable/$STAGE/narco"
+          chmod +x "portable/$STAGE/narco"
+          # find_tor_binary() looks in ./tor beside the executable.
+          cp -r app/src-tauri/tor "portable/$STAGE/tor"
+          cat > "portable/$STAGE/README.txt" <<'EOF'
+          Narco — private chat for two people.
+
+          Run ./narco from this folder.
+
+          Keep the "tor" folder next to the narco executable: the app starts
+          that Tor daemon itself. Nothing is installed and nothing is left
+          behind when you delete this folder.
+          EOF
+          tar czf "portable/${STAGE}.tar.gz" -C portable "$STAGE"
+          ls -la portable
 
       # No installer on Windows: just the executable, shipped as a portable zip.
       - name: Build (Windows → executable only)
@@ -154,11 +183,12 @@ jobs:
 
             | Platform | File |
             | --- | --- |
-            | Linux (any distro) | `.AppImage` — `chmod +x`, then run |
+            | Linux (any distro) | `_linux_portable.tar.gz` — extract, run `./narco` |
             | Windows | `_portable.zip` — unzip, run `Narco.exe` |
 
-            No installer: unzip and run. Keep `Narco.exe` and the `tor` folder
-            together — the app runs that Tor daemon.
+            No installer on either platform: extract and run. Keep the
+            executable and the `tor` folder together — the app runs that Tor
+            daemon itself.
 
             Windows will warn that the publisher is unknown, because the build
             is unsigned. Choose **More info → Run anyway**.
@@ -174,5 +204,5 @@ jobs:
             Both people enter the same secret, in the same order if you use
             more than one. Generate a fresh secret for each conversation.
           files: |
-            app/src-tauri/target/release/bundle/appimage/*.AppImage
             portable/*.zip
+            portable/*.tar.gz
