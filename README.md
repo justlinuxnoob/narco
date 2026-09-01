@@ -87,11 +87,10 @@ established, reviewed crate.
 | `crates/narco-proto` | All cryptography. Transport-agnostic, no Tor dependency. |
 | `crates/narco-tor` | Secret → onion address, and meeting without a server. |
 | `app/` | Tauri desktop app. Holds no keys; the UI is 4 kB of JavaScript. |
-| `server/` | **Optional.** A blind relay you can self-host for instant connects instead of Tor. Not used by default. |
 
-`server/` has no dependency on `narco-proto`, and must never gain one — the relay
-holds no keys and contains no cryptography. That absence is checkable from its
-`Cargo.toml`.
+There is no fourth entry. Narco once carried an optional self-hosted relay; it
+was removed in 0.5.5, because nothing could select it and shipping an unusable
+server in a project whose first claim is "no server" was worse than useless.
 
 ## Build
 

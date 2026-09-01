@@ -2,57 +2,50 @@
 #
 # Arch / CachyOS / Manjaro package for Narco.
 #
-# Tauri cannot emit pacman packages — it only produces deb, rpm, and AppImage —
-# so this repackages the released AppImage into a normal system package with a
-# desktop entry, icon, and `narco` on your PATH.
-#
 #   cd packaging && makepkg -si
 #
-# To build from source instead, see the narco-git PKGBUILD notes at the bottom.
+# Repackages the released portable tarball into a normal system package with a
+# desktop entry, an icon, and `narco` on your PATH.
 
 pkgname=narco-bin
 _pkgname=narco
-# Keep in step with the latest GitHub release tag; the source URL below is
-# built from it. A mismatch here yields a 404 at download time.
-pkgver=0.5.0
+# Keep in step with the latest release tag; the source URL is built from it, so
+# a mismatch here is a 404 at download time.
+pkgver=0.5.5
 pkgrel=1
 pkgdesc="Private chat for two people. No accounts, no server, no history."
 arch=('x86_64')
 url="https://github.com/justlinuxnoob/narco"
 license=('AGPL-3.0-or-later')
-# The AppImage bundles its own runtime; FUSE is only needed to extract it here.
+# The tarball is not an AppImage and carries no WebKit of its own.
 depends=('webkit2gtk-4.1' 'gtk3')
-makedepends=('fuse2')
 provides=("$_pkgname")
 conflicts=("$_pkgname")
+# The bundled tor is an upstream release build; stripping it gains nothing and
+# risks breaking a binary we did not compile.
 options=('!strip')
 
-source=("$_pkgname-$pkgver.AppImage::$url/releases/download/v$pkgver/Narco_${pkgver}_amd64.AppImage")
-# 'SKIP' disables verification — acceptable only because you can (and for a
-# security tool, should) replace it with the real hash of the published
-# AppImage: `updpkgsums`, or `sha256sum Narco_<ver>_amd64.AppImage`. Left as
-# SKIP here so the template builds before a release is cut.
+source=("$_pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/Narco_${pkgver}_linux_portable.tar.gz")
+# 'SKIP' disables verification. For a security tool you should replace it with
+# the real hash before installing: run `updpkgsums`, or
+# `sha256sum Narco_<ver>_linux_portable.tar.gz`. Left as SKIP so this template
+# builds before a release is cut.
 sha256sums=('SKIP')
 
-prepare() {
-    chmod +x "$_pkgname-$pkgver.AppImage"
-    # --appimage-extract avoids needing FUSE mounted at build time.
-    ./"$_pkgname-$pkgver.AppImage" --appimage-extract > /dev/null
-}
-
 package() {
-    cd "$srcdir/squashfs-root"
+    cd "$srcdir/Narco_${pkgver}_linux_portable"
 
-    install -Dm755 "usr/bin/$_pkgname-app" "$pkgdir/usr/bin/$_pkgname" 2>/dev/null \
-        || install -Dm755 "usr/bin/narco-app" "$pkgdir/usr/bin/$_pkgname"
+    # The app locates its daemon in ./tor beside its own executable, so the two
+    # must stay together. /usr/bin/narco is a symlink, and current_exe()
+    # resolves it — the lookup lands in /usr/lib/narco/tor either way.
+    install -Dm755 narco "$pkgdir/usr/lib/$_pkgname/narco"
+    for f in tor/*; do
+        install -Dm755 "$f" "$pkgdir/usr/lib/$_pkgname/$f"
+    done
+    install -dm755 "$pkgdir/usr/bin"
+    ln -s "/usr/lib/$_pkgname/narco" "$pkgdir/usr/bin/$_pkgname"
 
-    # Desktop entry, if the AppImage shipped one; otherwise write a minimal one.
-    if [ -f "$_pkgname.desktop" ] || [ -f "narco-app.desktop" ]; then
-        install -Dm644 ./*.desktop "$pkgdir/usr/share/applications/$_pkgname.desktop"
-        sed -i "s|^Exec=.*|Exec=$_pkgname|" "$pkgdir/usr/share/applications/$_pkgname.desktop"
-    else
-        install -dm755 "$pkgdir/usr/share/applications"
-        cat > "$pkgdir/usr/share/applications/$_pkgname.desktop" <<EOF
+    install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/$_pkgname.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Narco
@@ -62,10 +55,9 @@ Icon=$_pkgname
 Categories=Network;InstantMessaging;
 Terminal=false
 EOF
-    fi
 
-    for size in 32x32 128x128 256x256; do
-        icon="usr/share/icons/hicolor/$size/apps/narco-app.png"
+    for size in 32x32 128x128; do
+        icon="$srcdir/../../app/src-tauri/icons/$size.png"
         [ -f "$icon" ] && install -Dm644 "$icon" \
             "$pkgdir/usr/share/icons/hicolor/$size/apps/$_pkgname.png"
     done
@@ -80,6 +72,7 @@ EOF
 #                      file openssl appmenu-gtk-module libappindicator-gtk3 \
 #                      librsvg
 #   git clone https://github.com/justlinuxnoob/narco && cd narco/app
-#   npm ci && npm run tauri build
+#   npm ci && npm run tauri build -- --no-bundle
 #
-# Expect a long compile: Tor (Arti) is 500+ crates.
+# You will also need a tor binary in app/src-tauri/tor/ — see the release
+# workflow, which fetches it from the Tor Expert Bundle.

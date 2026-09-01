@@ -196,9 +196,10 @@ impl TorDaemon {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
 
-        // The geoip tables ship in the bundle's data/ directory; we place them
-        // beside the binary. tor runs without them but complains, and uses them
-        // to avoid building paths that stay within one country.
+        // Used only if the tables are present. We stopped shipping them: they
+        // are 24 MB, and path selection does not consult them — tor picks for
+        // subnet and family diversity, not country. They matter only for the
+        // country-based node rules this app never sets.
         if let Some(dir) = tor.parent() {
             for (option, name) in [("GeoIPFile", "geoip"), ("GeoIPv6File", "geoip6")] {
                 let path = dir.join(name);
@@ -232,6 +233,14 @@ impl TorDaemon {
             .args(["ControlPortWriteToFile", &control_file.to_string_lossy()])
             .args(["CookieAuthentication", "1"])
             .args(["ClientOnly", "1"])
+            // Tie the daemon's life to ours. Windows does not kill a child
+            // when its parent dies, and the Drop that used to do it never runs
+            // when the window closes and the process exits — so every session
+            // left an orphaned tor holding this directory's lock, and the next
+            // launch died against it with "another Tor process is running".
+            // tor watches this pid and exits once it is gone, which covers a
+            // crash or a kill as well as a clean exit.
+            .args(["__OwningControllerProcess", &std::process::id().to_string()])
             // Quieter and faster: we never act as a relay or need IPv6-only.
             .args(["AvoidDiskWrites", "1"])
             .stdout(Stdio::piped())
@@ -279,6 +288,14 @@ impl TorDaemon {
                 DaemonError::Control(format!("could not reach tor on port {control_port}: {e}"))
             })?;
         authenticate(&mut control, &cookie).await?;
+
+        // The second half of the same guarantee: tor shuts down when this
+        // control connection closes. The operating system closes it for us
+        // however the app dies, so this covers the cases the pid check cannot.
+        if let Err(e) = command_on(&mut control, "TAKEOWNERSHIP\r\n").await {
+            // Not fatal on its own — the pid check above still applies.
+            tracing::warn!("tor did not accept TAKEOWNERSHIP: {e}");
+        }
 
         let socks_port = read_socks_port(&mut control).await?;
 
@@ -366,9 +383,19 @@ impl TorDaemon {
 
     /// Send one control command and collect its reply.
     async fn command(&mut self, cmd: &str) -> Result<String, DaemonError> {
-        self.control.write_all(cmd.as_bytes()).await?;
-        self.control.flush().await?;
-        read_reply(&mut self.control).await
+        command_on(&mut self.control, cmd).await
+    }
+}
+
+/// Send one control command on a connection we do not own yet.
+async fn command_on(control: &mut TcpStream, cmd: &str) -> Result<String, DaemonError> {
+    control.write_all(cmd.as_bytes()).await?;
+    control.flush().await?;
+    let reply = read_reply(control).await?;
+    if reply.starts_with("250") {
+        Ok(reply)
+    } else {
+        Err(DaemonError::Control(reply.trim().to_string()))
     }
 }
 
@@ -449,6 +476,18 @@ async fn with_tor_output(
         Ok(r) if !r.is_empty() => r.join(" | "),
         _ => return error,
     };
+
+    // Say what to do, not just what happened. A tor left over from an older
+    // build holds this lock and no amount of retrying clears it.
+    if tail.contains("another Tor process is running") {
+        return DaemonError::Spawn(
+            "a Tor process from an earlier session is still running and holding \
+             Narco's data directory. Close Narco, end any tor process in your \
+             task manager, and start it again. Builds after 0.5.4 shut their \
+             own Tor down and will not do this."
+                .into(),
+        );
+    }
     match error {
         DaemonError::Spawn(m) => DaemonError::Spawn(format!("{m}. tor said: {tail}")),
         DaemonError::Bootstrap(m) => DaemonError::Bootstrap(format!("{m}. tor said: {tail}")),

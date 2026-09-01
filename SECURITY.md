@@ -39,13 +39,6 @@ is the honest recommendation.
   itself can be blocked. Narco fails closed — it will not connect rather than
   connect insecurely.
 
-### If you use the optional relay instead of Tor
-
-`server/` is not used by default. If you self-host it, the operator additionally
-sees the room id (an Argon2id-hardened hash of your secrets), both IP addresses,
-timing, message counts, and padded sizes. Never message content — the relay holds
-no keys and does not parse the bytes it forwards.
-
 ## Design decisions worth reviewing
 
 Places where a reviewer should look hardest:

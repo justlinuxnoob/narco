@@ -13,7 +13,6 @@ resolver = "2"
 members = [
     "crates/narco-proto",
     "crates/narco-tor",
-    "server",
 ]
 exclude = [
     "app/src-tauri",

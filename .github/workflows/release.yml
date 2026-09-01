@@ -102,15 +102,14 @@ jobs:
           echo "downloading $URL"
           curl -fsSL --retry 3 -o teb.tar.gz "$URL"
           mkdir -p app/src-tauri/tor
-          # Take the daemon and its libraries; skip pluggable transports, which
-          # are only needed for censored networks and would add ~30 MB.
+          # The daemon and its libraries, and nothing else. Skipped:
+          #   pluggable_transports — only for censored networks, ~30 MB
+          #   tor-gencert          — for running a directory authority, 6 MB
+          #   geoip/geoip6         — 24 MB, and path selection never reads
+          #                          them; tor picks relays for subnet and
+          #                          family diversity, not country
           tar xzf teb.tar.gz -C app/src-tauri/tor --strip-components=1 \
-            --exclude='pluggable_transports' tor
-          # The geoip tables live in data/, not tor/. Without them tor warns on
-          # every start and cannot tell which country a relay is in, so it may
-          # build a path that never leaves one.
-          tar xzf teb.tar.gz -C app/src-tauri/tor --strip-components=1 \
-            data/geoip data/geoip6
+            --exclude='pluggable_transports' --exclude='tor-gencert*' tor
           ls -la app/src-tauri/tor
           # The daemon is the whole point of the bundle; if it is missing the
           # build must fail here rather than ship an app that cannot start.
@@ -154,11 +153,13 @@ jobs:
           tar czf "portable/${STAGE}.tar.gz" -C portable "$STAGE"
           ls -la portable
 
-      # No installer on Windows: just the executable, shipped as a portable zip.
-      - name: Build (Windows → executable only)
+      # One compile, two artifacts: the raw exe becomes the portable zip below,
+      # and the same build bundles an installer for people who would rather
+      # have a Start-menu entry than a folder.
+      - name: Build (Windows → exe + installer)
         if: matrix.os == 'windows-latest'
         working-directory: app
-        run: npm run tauri build -- --no-bundle
+        run: npm run tauri build -- --bundles nsis
 
       # A portable Windows build: the raw exe (frontend embedded), no installer.
       # Just download and run — no install, no SmartScreen install step.
@@ -175,6 +176,10 @@ jobs:
           # and its DLLs travel with it. A bare .exe would have no Tor at all.
           cp -r app/src-tauri/tor "portable/$STAGE/tor"
           (cd portable && 7z a -tzip "${STAGE}.zip" "$STAGE" >/dev/null)
+          # The installer carries tor as a Tauri resource, so it needs no
+          # repackaging — just a name that says what it is.
+          cp app/src-tauri/target/release/bundle/nsis/*-setup.exe \
+             "portable/Narco_${V}_installer.exe"
           ls -la portable
 
       # AppImage is the one that matters for Arch-family distros, which have no
@@ -197,12 +202,13 @@ jobs:
 
             | Platform | File |
             | --- | --- |
+            | Windows, simplest | `_installer.exe` — install and launch from the Start menu |
+            | Windows, no install | `_portable.zip` — unzip, run `Narco.exe` |
             | Linux (any distro) | `_linux_portable.tar.gz` — extract, run `./narco` |
-            | Windows | `_portable.zip` — unzip, run `Narco.exe` |
 
-            No installer on either platform: extract and run. Keep the
-            executable and the `tor` folder together — the app runs that Tor
-            daemon itself.
+            The portable builds keep the executable and the `tor` folder
+            together — the app runs that Tor daemon itself. The installer
+            handles that for you.
 
             Windows will warn that the publisher is unknown, because the build
             is unsigned. Choose **More info → Run anyway**.
@@ -220,3 +226,4 @@ jobs:
           files: |
             portable/*.zip
             portable/*.tar.gz
+            portable/*_installer.exe
