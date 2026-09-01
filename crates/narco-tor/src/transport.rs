@@ -1,39 +1,23 @@
 //! Establishing a peer connection over Tor with no server and no signalling.
 //!
 //! Both peers derive the *same* onion address from the room code (see
-//! [`crate::identity`]). A connection needs one side listening and one side
-//! dialling, and the peers cannot negotiate which is which without already
-//! being connected. [`TorTransport::meet_candidates`] resolves that without any
-//! negotiation: **both peers publish the address and both dial it.**
+//! [`crate::identity`]), but the roles are **explicit**, chosen by the humans
+//! like a phone call:
 //!
-//! Their two descriptors collide in the Tor directory and one wins, which
-//! supplies the asymmetry:
+//! * [`TorTransport::host`] publishes an onion service at the address and
+//!   accepts the first connection that completes the handshake.
+//! * [`TorTransport::join`] dials that address and never publishes.
 //!
-//! * the peer whose descriptor **won** accepts the other's dial, and its own
-//!   dial loops back to itself;
-//! * the peer whose descriptor **lost** dials into the winner, and its own
-//!   service is never found.
+//! Because only the host publishes and only the joiner dials, a device never
+//! connects to itself. That removes the self-connection problem outright (there
+//! is nothing to detect) and avoids two services competing to publish one
+//! address.
 //!
-//! Exactly one real pairing exists, plus one self-connection. The self-connection
-//! is rejected by the SPAKE2 reflection check in [`narco_proto`], and because
-//! every candidate gets its own `Session`, discarding one costs nothing. This
-//! converges on the first attempt — verified over the live network in
-//! `examples/live_handshake.rs`.
-//!
-//! # Why not pick a role by coin flip?
-//!
-//! That was the first design and it is much worse. Half the time both peers pick
-//! the same role, and neither discovers it until a round times out — and rounds
-//! must be minutes long, because publishing a descriptor and having it propagate
-//! genuinely takes that long. Expected cost was two rounds; worst case was
-//! several. [`Role`] and [`TorTransport::meet_once`] survive only so tests can
-//! force a specific role.
-//!
-//! Naively racing accept-and-dial *without* the shared address is a different
-//! trap: two peers each publishing a *different* address form two separate
-//! connections, and each side's `select!` may win on a different one, leaving
-//! them holding opposite halves of two dead channels. Sharing one address is
-//! what makes the race safe.
+//! An earlier symmetric design had both peers publish *and* dial, resolving the
+//! ambiguity by descriptor collision. It was removed: a device could complete a
+//! SPAKE2 handshake with itself (the reflection check cannot catch it — the two
+//! ends are independent sessions with different ephemerals), and running two
+//! services at one address is a genuinely hard problem (cf. OnionBalance).
 //!
 //! See PROTOCOL.md §11.
 
