@@ -16,11 +16,11 @@
 #![forbid(unsafe_code)]
 
 pub mod daemon;
-pub mod identity;
 pub mod onion;
 pub mod transport;
 pub mod wire;
 
-pub use identity::{identities, identity, OnionIdentity, Slot};
-pub use transport::{BridgeSettings, Status, TorError, TorTransport};
+pub use daemon::{DaemonError, TorDaemon};
+pub use onion::{onion_key, OnionKey};
+pub use transport::{Status, TorError, TorTransport};
 pub use wire::{run_handshake, ConnectError, Connected};

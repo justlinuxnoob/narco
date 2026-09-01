@@ -4,9 +4,9 @@
 //! handshake over it. It is used identically by the host (over an accepted
 //! connection) and the joiner (over a dialled one).
 
-use futures::io::{AsyncReadExt, AsyncWriteExt};
 use narco_proto::kdf::Derived;
 use narco_proto::{Error as ProtoError, Event, Session};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Upper bound on a single frame. The largest legitimate frame is a 64 KiB
 /// padding bucket plus AEAD and framing overhead.
@@ -115,37 +115,20 @@ where
 mod tests {
     use super::*;
 
-    /// The two ends of an in-memory duplex, so the handshake can be exercised
-    /// without touching Tor.
-    fn duplex() -> (futures::io::Cursor<Vec<u8>>, futures::io::Cursor<Vec<u8>>) {
-        (
-            futures::io::Cursor::new(Vec::new()),
-            futures::io::Cursor::new(Vec::new()),
-        )
+    #[tokio::test]
+    async fn frames_round_trip_over_a_duplex() {
+        let (mut a, mut b) = tokio::io::duplex(64 * 1024);
+        for payload in [&b""[..], &b"hello"[..], &vec![7u8; 5000][..]] {
+            send_frame(&mut a, payload).await.unwrap();
+            assert_eq!(recv_frame(&mut b).await.unwrap(), payload);
+        }
     }
 
-    #[test]
-    fn frame_roundtrip_and_oversize_rejection() {
-        futures::executor::block_on(async {
-            let (mut a, _) = duplex();
-            send_frame(&mut a, b"hello").await.unwrap();
-            a.set_position(0);
-            assert_eq!(recv_frame(&mut a).await.unwrap(), b"hello");
-
-            // A length header larger than MAX_FRAME must be refused outright,
-            // not used to allocate.
-            let mut evil = futures::io::Cursor::new((u32::MAX).to_be_bytes().to_vec());
-            assert!(recv_frame(&mut evil).await.is_err());
-        });
-    }
-
-    #[test]
-    fn empty_frame_roundtrips() {
-        futures::executor::block_on(async {
-            let (mut a, _) = duplex();
-            send_frame(&mut a, b"").await.unwrap();
-            a.set_position(0);
-            assert_eq!(recv_frame(&mut a).await.unwrap(), b"");
-        });
+    #[tokio::test]
+    async fn oversize_length_header_is_refused() {
+        // Must be rejected outright rather than used to allocate.
+        let (mut a, mut b) = tokio::io::duplex(64);
+        a.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
+        assert!(recv_frame(&mut b).await.is_err());
     }
 }

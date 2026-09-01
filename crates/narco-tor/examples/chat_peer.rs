@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let started = Instant::now();
 
     let derived = narco_proto::derive_multi(&[code.as_str()])?;
-    let (addr, _) = narco_tor::identities(&derived);
+    let addr = narco_tor::onion_key(&derived);
     eprintln!("[peer] role={role}, meeting at {}", addr.address);
 
     let dir = std::env::temp_dir().join("narco-cli-peer");
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         other => panic!("unknown role {other:?}; use `host` or `join`"),
     };
     let mut session = conn.session;
-    let (mut reader, mut writer) = conn.stream.split();
+    let (mut reader, mut writer) = tokio::io::split(conn.stream);
 
     eprintln!("[peer] CONNECTED in {:?} — encrypted", started.elapsed());
     send_frame(

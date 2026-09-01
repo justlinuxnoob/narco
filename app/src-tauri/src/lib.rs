@@ -145,16 +145,14 @@ fn status_parts(s: Status) -> (String, &'static str) {
     match s {
         // Bootstrap downloads Tor's relay directory, so show real progress
         // rather than a spinner that cannot be told apart from a hang.
-        Status::BootstrappingTor { percent } => {
-            (format!("Joining the Tor network… {percent}%"), "tor")
-        }
-        Status::TorBlocked { detail } => (
-            format!("Tor seems blocked on this network ({detail}). Still trying…"),
+        // tor reports its own phase text ("Loading relay descriptors", …), so a
+        // stall names the stage it stalled at instead of showing a bare number.
+        Status::BootstrappingTor { percent, detail } => (
+            format!("Joining the Tor network… {percent}% — {detail}"),
             "tor",
         ),
         Status::PublishingService => ("Publishing your address…".into(), "publish"),
         Status::WaitingForPeer => ("Waiting for the other person…".into(), "peer"),
-        Status::Retrying { .. } => ("Still waiting…".into(), "peer"),
         Status::PeerFound => ("Found them. Verifying it's really them…".into(), "verify"),
     }
 }
@@ -342,7 +340,7 @@ async fn run_session(
 
     emit(app, UiEvent::Ready);
 
-    let (mut reader, mut writer) = futures::AsyncReadExt::split(stream);
+    let (mut reader, mut writer) = tokio::io::split(stream);
 
     loop {
         tokio::select! {
@@ -480,6 +478,17 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AppState::default())
+        .setup(|app| {
+            // Point the transport at the tor binary we bundle. Tauri's resource
+            // directory differs by platform and packaging format, so the crate
+            // cannot locate it on its own.
+            if let Ok(dir) = app.path().resource_dir() {
+                let tor_dir = dir.join("tor");
+                push_log(&format!("[narco] bundled tor dir: {}", tor_dir.display()));
+                std::env::set_var("NARCO_TOR_DIR", tor_dir);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             generate_code,
             check_code,

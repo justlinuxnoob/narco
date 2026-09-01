@@ -87,20 +87,24 @@ mod tests {
     use super::*;
     use narco_proto::kdf;
 
-    /// The whole point: this must produce the *same* address as the Arti-based
-    /// derivation, or switching engines would move where peers meet and break
-    /// every existing code.
+    /// Addresses must never drift: a change here would move where peers meet
+    /// and silently break every code already in use. These vectors were
+    /// captured from the previous Arti-based implementation, and the first was
+    /// re-confirmed by the live daemon, which published exactly this address.
     #[test]
-    fn matches_the_arti_derivation() {
-        for code in [
-            "PWXK7M2QRT9HFZ",
-            "13749832sfdbdjdv78394324",
-            "some-decent-code-42",
+    fn addresses_match_known_vectors() {
+        for (code, want) in [
+            (
+                "PWXK7M2QRT9HFZ",
+                "nhcp7vstfbdtyxjz3cz2752qvcife4vnliikpux3c3kijquxd2ksxjqd.onion",
+            ),
+            (
+                "13749832sfdbdjdv78394324",
+                "47v7es3j2epeuqz3cmkrxhu2mzhaeud2jvsw5goedca2hublscb74kid.onion",
+            ),
         ] {
-            let d = kdf::derive(code).unwrap();
-            let ours = onion_key(&d).address;
-            let arti = crate::identity::identity(&d, crate::identity::Slot::A).address;
-            assert_eq!(ours, arti, "address mismatch for {code:?}");
+            let got = onion_key(&kdf::derive(code).unwrap()).address;
+            assert_eq!(got, want, "address drifted for {code:?}");
         }
     }
 

@@ -62,6 +62,15 @@ impl From<io::Error> for DaemonError {
 pub fn find_tor_binary() -> Result<PathBuf, DaemonError> {
     let name = if cfg!(windows) { "tor.exe" } else { "tor" };
 
+    // Set by the app to Tauri's resource directory, whose location differs per
+    // platform and packaging format, so it cannot be guessed from here.
+    if let Some(dir) = std::env::var_os("NARCO_TOR_DIR") {
+        let candidate = PathBuf::from(dir).join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             for candidate in [dir.join(name), dir.join("tor").join(name)] {

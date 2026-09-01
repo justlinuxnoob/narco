@@ -63,6 +63,32 @@ jobs:
             console.log('version set to', j.version);
           "
 
+      # Ship the C tor daemon alongside the app. Narco drives this binary rather
+      # than embedding a Tor library, because the library could not complete
+      # circuits on several Windows machines. This is the same build Tor Browser
+      # uses. The bundle also carries tor's own libssl/libcrypto/libevent, which
+      # must travel with it.
+      - name: Fetch Tor Expert Bundle
+        shell: bash
+        env:
+          TOR_VERSION: "15.0.20"
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            PLATFORM="windows-x86_64"
+          else
+            PLATFORM="linux-x86_64"
+          fi
+          URL="https://dist.torproject.org/torbrowser/${TOR_VERSION}/tor-expert-bundle-${PLATFORM}-${TOR_VERSION}.tar.gz"
+          echo "downloading $URL"
+          curl -fsSL --retry 3 -o teb.tar.gz "$URL"
+          mkdir -p app/src-tauri/tor
+          # Take the daemon and its libraries; skip pluggable transports, which
+          # are only needed for censored networks and would add ~30 MB.
+          tar xzf teb.tar.gz -C app/src-tauri/tor --strip-components=1 \
+            --exclude='pluggable_transports' tor
+          ls -la app/src-tauri/tor
+
       - name: Install frontend
         working-directory: app
         run: npm ci

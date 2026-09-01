@@ -9,3 +9,6 @@ app/src-tauri/gen/
 *.key
 .env
 .env.*
+
+# Bundled Tor daemon, fetched at build time by CI (see release.yml)
+app/src-tauri/tor/

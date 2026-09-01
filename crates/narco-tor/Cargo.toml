@@ -13,41 +13,10 @@ repository = "https://github.com/justlinuxnoob/narco"
 [dependencies]
 narco-proto = { path = "../narco-proto" }
 
-arti-client = { version = "0.45", default-features = false, features = [
-    "tokio",
-    "rustls",
-    "onion-service-client",
-    "onion-service-service",
-    "experimental-api",
-    "keymgr",
-    "ephemeral-keystore",
-    # Compile SQLite from source rather than linking a system library. Arti's
-    # directory cache needs it, and Windows has no system sqlite3 to link
-    # against — without this the Windows build fails at link time with
-    # LNK1181. Enabled on every platform so builds do not vary with whatever
-    # SQLite happens to be installed.
-    "static-sqlite",
-    # Censorship resistance. `bridge-client` lets us route through bridges
-    # (unlisted entry relays); `pt-client` adds pluggable transports (obfs4 via
-    # an external lyrebird binary) so the traffic is obfuscated against DPI —
-    # what public users on networks that block Tor actually need.
-    "bridge-client",
-    "pt-client",
-] }
-tor-hscrypto = "0.45"
-tor-hsservice = "0.45"
-tor-llcrypto = "0.45"
-tor-keymgr = "0.45"
-tor-rtcompat = { version = "0.45", features = ["tokio", "rustls"] }
-safelog = "0.9"
-
-tokio = { version = "1", features = ["rt", "sync", "time", "macros", "io-util"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "io-util", "net", "process"] }
 futures = "0.3"
 zeroize = "1.9"
 getrandom = "0.3"
-tor-cell = "0.45"
-tor-config = "0.45"
-rustls = { version = "0.23", features = ["ring"] }
 ed25519-dalek = "2"
 sha3 = "0.11"
 data-encoding = "2"
@@ -58,4 +27,5 @@ sha2 = "0.11"
 unsafe_code = "forbid"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

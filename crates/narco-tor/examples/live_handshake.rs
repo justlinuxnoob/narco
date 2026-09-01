@@ -7,11 +7,11 @@
 //! clients with separate state directories, matching two real installs. No
 //! device connects to itself, because only the host publishes.
 
-use futures::io::{AsyncReadExt, AsyncWriteExt};
 use narco_proto::Event;
 use narco_tor::wire::{recv_frame, send_frame, Connected};
 use narco_tor::{Status, TorTransport};
 use std::time::Instant;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const CODE: &str = "PWXK7M2QRT9HFZ";
 const PASSPHRASE: &str = "said out loud";
@@ -35,7 +35,7 @@ async fn chat<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let started = Instant::now();
     let derived = narco_proto::derive_multi(&[CODE, PASSPHRASE])?;
-    let (addr, _) = narco_tor::identities(&derived);
+    let addr = narco_tor::onion_key(&derived);
     println!("meeting at {}\n", addr.address);
 
     // Distinct state dirs so two clients can share one machine without fighting
