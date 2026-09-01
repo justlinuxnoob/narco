@@ -63,8 +63,13 @@ jobs:
             exit 1
           fi
 
+  # Only on pull requests. A push to main that matters is tagged, and the tag
+  # already builds both platforms for real — running this too meant four jobs
+  # compiling the same commit and competing for runners with the release
+  # someone is waiting on.
   build:
     name: build ${{ matrix.os }}
+    if: github.event_name != 'push'
     needs: test
     strategy:
       fail-fast: false
@@ -97,16 +102,10 @@ jobs:
         working-directory: app
         run: npm ci
 
+      # No bundler: this job answers "does it still compile on both platforms",
+      # and the packaging it used to run needs the tor daemon fetched, which
+      # only the release workflow does. Bundling here would fail looking for
+      # resources that are not there.
       - name: Build
         working-directory: app
-        run: npm run tauri build
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: narco-${{ matrix.os }}
-          retention-days: 14
-          if-no-files-found: warn
-          path: |
-            app/src-tauri/target/release/bundle/deb/*.deb
-            app/src-tauri/target/release/bundle/appimage/*.AppImage
-            app/src-tauri/target/release/bundle/nsis/*.exe
+        run: npm run tauri build -- --no-bundle
