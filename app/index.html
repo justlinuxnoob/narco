@@ -54,8 +54,14 @@
       </button>
 
       <div class="row">
-        <button id="start" type="button">start</button>
+        <button id="host" type="button">start &amp; host</button>
+        <button id="join" class="ghost" type="button">join</button>
       </div>
+      <p class="hint">
+        One of you taps <strong>start &amp; host</strong> and shares the code; the
+        other pastes it and taps <strong>join</strong>. Like a call — one dials,
+        one answers.
+      </p>
 
       <p class="error" id="entry-error" role="alert"></p>
     </main>
@@ -73,6 +79,14 @@
 
       <p class="status" id="status">Starting…</p>
       <p class="elapsed"><span id="elapsed">0:00</span> elapsed</p>
+
+      <div id="share" hidden>
+        <p class="hint">Send this code to the other person:</p>
+        <div class="share-row">
+          <code id="share-code"></code>
+          <button id="share-copy" class="icon" type="button">copy</button>
+        </div>
+      </div>
 
       <p class="hint" id="patience">
         This usually takes <strong>1–2 minutes</strong>, and it is not stuck.

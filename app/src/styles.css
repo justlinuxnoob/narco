@@ -409,3 +409,24 @@ button.icon:hover:not(:disabled) {
   font-weight: 400;
   letter-spacing: 0;
 }
+
+/* --- host's shareable code on the connecting screen ---------------------- */
+
+#share {
+  margin: 6px 0;
+}
+
+.share-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.share-row code {
+  flex: 1;
+  font-size: 13px;
+  word-break: break-all;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+}

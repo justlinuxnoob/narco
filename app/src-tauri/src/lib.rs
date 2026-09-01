@@ -192,6 +192,7 @@ async fn connect(
     state: State<'_, AppState>,
     secrets: Vec<String>,
     idle_secs: u64,
+    host: bool,
 ) -> Result<(), String> {
     // Validate before doing anything slow.
     let derived = narco_proto::derive_multi(&secrets).map_err(|e| e.to_string())?;
@@ -210,7 +211,7 @@ async fn connect(
         // Catch panics so a bug can never leave the UI waiting forever with no
         // explanation. Every path out of here emits an Ended event.
         let reason = match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-            run_session(&app, derived, rx, idle_secs, tor),
+            run_session(&app, derived, rx, idle_secs, tor, host),
         ))
         .await
         {
@@ -239,6 +240,7 @@ async fn run_session(
     mut rx: mpsc::Receiver<Cmd>,
     idle_secs: u64,
     tor: Arc<tokio::sync::OnceCell<Arc<TorTransport>>>,
+    host: bool,
 ) -> String {
     // 0 means the user chose "never". Represent it as an effectively unreachable
     // deadline rather than branching the select! arm.
@@ -254,10 +256,15 @@ async fn run_session(
     };
 
     let app_status = app.clone();
-    let connected = narco_tor::connect(transport.as_ref(), &derived, move |s| {
-        emit_status(&app_status, s);
-    })
-    .await;
+    let cb = move |s| emit_status(&app_status, s);
+    // The starter hosts the onion service; the joiner only dials it. One side
+    // publishing and the other dialling is what makes a device never connect to
+    // itself.
+    let connected = if host {
+        transport.host(&derived, cb).await
+    } else {
+        transport.join(&derived, cb).await
+    };
 
     let Connected {
         mut session,

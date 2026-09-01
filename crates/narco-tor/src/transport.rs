@@ -38,11 +38,14 @@
 //! See PROTOCOL.md §11.
 
 use crate::identity::{self, Slot};
+use crate::wire::{run_handshake, ConnectError, Connected};
 use futures::StreamExt;
 use narco_proto::kdf::Derived;
+use narco_proto::Error as ProtoError;
 use std::sync::Arc;
 use std::time::Duration;
-use tor_cell::relaycell::msg::Connected;
+// Aliased so it does not clash with our own `wire::Connected` connection type.
+use tor_cell::relaycell::msg::Connected as ConnectedCell;
 use tor_hsservice::config::OnionServiceConfigBuilder;
 use tor_hsservice::{handle_rend_requests, HsNickname};
 
@@ -104,36 +107,20 @@ fn configure_bridges(
     Ok(())
 }
 
-/// How long to give one round before re-flipping the coin.
-///
-/// Measured, not guessed: publishing an onion descriptor requires building
-/// introduction circuits and uploading to the directory, and the far side then
-/// has to fetch it. End to end that runs past a minute on a cold client, so a
-/// short timeout gives up while the handshake is still working.
-const ROUND_TIMEOUT: Duration = Duration::from_secs(240);
+/// Give up if the other person never shows. Deliberately long (the two people
+/// may press Start/Join minutes apart); the user can cancel any time.
+const MEET_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// Give up on joining Tor and report it, rather than sitting on the connecting
 /// screen forever. On a working network this takes ~20-40s; a network that
 /// blocks Tor otherwise hangs with no explanation and no way to retry.
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(150);
 
-/// Pause between dial attempts within a round. The peer may not have published
+/// Pause between dial attempts while joining. The host may not have published
 /// yet, so early failures are expected rather than fatal.
 const DIAL_RETRY: Duration = Duration::from_secs(4);
 
-/// Which end of the connection this peer is for one round.
-///
-/// Chosen by coin flip, *not* derived from the code: if it were derived, both
-/// peers would choose identically every time and never connect.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Role {
-    /// Publish the onion service and wait for the peer to dial in.
-    Host,
-    /// Dial the onion address and wait for the peer to publish it.
-    Dial,
-}
-
-/// Coarse progress, for a UI that must explain a 30-90 second wait.
+/// Coarse progress, for a UI that must explain a slow connect.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Status {
     /// Connecting to the Tor network. The slowest and most variable step.
@@ -316,70 +303,24 @@ impl TorTransport {
         Ok(Self { client })
     }
 
-    /// Publish and dial until a peer connection exists.
+    /// Host the meeting: publish the onion service, accept the first connection
+    /// that completes the handshake, then stop — dropping the service so no one
+    /// else can join.
     ///
-    /// Returns the first usable connection. The caller runs the SPAKE2
-    /// handshake over it and, if that fails, may call this again.
-    pub async fn meet(
+    /// Only the host publishes and only the joiner dials, so a device never
+    /// connects to itself. That removes the self-connection problem and the
+    /// "two devices publishing one address" fragility entirely.
+    pub async fn host(
         &self,
         derived: &Derived,
         on_status: impl Fn(Status),
-    ) -> Result<DataStream, TorError> {
-        for round in 0u32.. {
-            if round > 0 {
-                on_status(Status::Retrying { round });
-            }
-            match self
-                .meet_once(derived, random_role(), round, &on_status)
-                .await?
-            {
-                Some(stream) => {
-                    on_status(Status::PeerFound);
-                    return Ok(stream);
-                }
-                // Both peers chose the same role. Re-flip.
-                None => continue,
-            }
-        }
-        unreachable!("0u32.. is unbounded")
-    }
-
-    /// Publish *and* dial simultaneously, yielding every candidate connection.
-    ///
-    /// This supersedes the coin flip and always converges on the first round.
-    /// Both peers publish the same address, so their descriptors collide and one
-    /// wins in the Tor directory. From there exactly one real pairing exists:
-    ///
-    /// * the peer whose descriptor **won** accepts the other's dial, while its
-    ///   own dial reaches *itself*;
-    /// * the peer whose descriptor **lost** dials into the winner, and its own
-    ///   service is never found.
-    ///
-    /// The self-connection is why this returns a stream of candidates rather
-    /// than one connection: the caller runs a `Session` per candidate and keeps
-    /// the first to reach `Ready`. A self-connection fails the SPAKE2 reflection
-    /// check and is discarded, costing nothing.
-    ///
-    /// Hold [`Meeting::service`] until the handshake confirms, then drop it. That
-    /// unpublishes the address, which is what enforces "only ever two people":
-    /// once both are in, there is no longer a door to knock on.
-    pub async fn meet_candidates(
-        &self,
-        derived: &Derived,
-        on_status: impl Fn(Status),
-    ) -> Result<Meeting, TorError> {
-        let meeting = identity::identity(derived, Slot::A);
-        let address = meeting.address.clone();
-
+    ) -> Result<Connected<DataStream>, ConnectError> {
         on_status(Status::PublishingService);
 
-        // A unique nickname per launch. `launch_onion_service_with_hsid`
-        // inserts the key with overwrite=false, so reusing a nickname on a
-        // second attempt (e.g. after a disconnect, since the Tor client and its
-        // ephemeral keystore are kept alive for speed) fails with
-        // KeyAlreadyExists — surfaced as a "bad api usage / keystore" error.
-        // The nickname is only a local label; the onion address comes from the
-        // keypair, so varying it changes nothing a peer can see.
+        // Unique nickname per launch: `launch_onion_service_with_hsid` inserts
+        // the key with overwrite=false, and the Tor client is kept alive across
+        // attempts, so a reused nickname fails with KeyAlreadyExists. The
+        // nickname is a local label; the address comes from the keypair.
         let n = LAUNCH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nickname =
             HsNickname::new(format!("narco{n}")).map_err(|e| TorError::Config(e.to_string()))?;
@@ -388,136 +329,93 @@ impl TorTransport {
             .build()
             .map_err(|e| TorError::Config(e.to_string()))?;
 
+        let meeting = identity::identity(derived, Slot::A);
         let (service, rend_requests) = self
             .client
             .launch_onion_service_with_hsid(svc_config, meeting.into_keypair())
             .map_err(|e| TorError::Launch(e.to_string()))?
             .ok_or(TorError::KeystoreDisabled)?;
 
-        // Small buffer: a handful of candidates is plenty, and a bounded channel
-        // stops a misbehaving peer from making us queue connections forever.
-        let (tx, candidates) = tokio::sync::mpsc::channel::<DataStream>(4);
-
-        let accept_tx = tx.clone();
-        tokio::spawn(async move {
-            let mut streams = handle_rend_requests(rend_requests);
-            while let Some(request) = streams.next().await {
-                if let Ok(stream) = request.accept(Connected::new_empty()).await {
-                    if accept_tx.send(stream).await.is_err() {
-                        break; // Receiver dropped: the session is settled.
-                    }
-                }
-            }
-        });
-
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            loop {
-                match client.connect((address.as_str(), VIRTUAL_PORT)).await {
-                    Ok(stream) => {
-                        if tx.send(stream).await.is_err() {
-                            break;
-                        }
-                        // Keep dialling: that connection may have been our own
-                        // service, in which case the caller will discard it.
-                        tokio::time::sleep(DIAL_RETRY).await;
-                    }
-                    // Expected until the peer publishes.
-                    Err(_) => tokio::time::sleep(DIAL_RETRY).await,
-                }
-            }
-        });
-
         on_status(Status::WaitingForPeer);
-        Ok(Meeting {
-            service,
-            candidates,
-        })
+
+        let mut streams = handle_rend_requests(rend_requests);
+        let deadline = tokio::time::Instant::now() + MEET_TIMEOUT;
+
+        loop {
+            let request = match tokio::time::timeout_at(deadline, streams.next()).await {
+                Ok(Some(req)) => req,
+                // Deadline passed, or the request stream ended.
+                _ => return Err(ConnectError::TimedOut),
+            };
+            let stream = match request.accept(ConnectedCell::new_empty()).await {
+                Ok(s) => s,
+                Err(_) => continue, // failed accept; wait for the next knock
+            };
+            on_status(Status::PeerFound);
+            match run_handshake(stream, derived).await {
+                Ok(conn) => {
+                    // Paired. Dropping the service tears down the introduction
+                    // points, so no further connection can be established — the
+                    // "only ever two people" guarantee, enforced in code rather
+                    // than assumed (there is no unpublish in the Tor protocol).
+                    drop(service);
+                    return Ok(conn);
+                }
+                // A stray connector or someone who typed a different code. Keep
+                // the service up and wait for the real peer.
+                Err(ConnectError::Protocol(ProtoError::ConfirmMismatch))
+                | Err(ConnectError::Protocol(ProtoError::Reflection)) => {
+                    on_status(Status::WaitingForPeer);
+                    continue;
+                }
+                // Connection dropped mid-handshake; wait for the next.
+                Err(_) => {
+                    on_status(Status::WaitingForPeer);
+                    continue;
+                }
+            }
+        }
     }
 
-    /// One round in a chosen role. `Ok(None)` means the round timed out, which
-    /// means both peers picked the same role.
-    ///
-    /// Exposed so tests can drive two peers deterministically rather than
-    /// waiting on coin flips.
-    pub async fn meet_once(
+    /// Join the meeting: dial the onion address (never publishing) and run the
+    /// handshake. Retries the dial until the host's service is reachable.
+    pub async fn join(
         &self,
         derived: &Derived,
-        role: Role,
-        round: u32,
-        on_status: &impl Fn(Status),
-    ) -> Result<Option<DataStream>, TorError> {
-        // Both roles use the same address: the one the room code names.
-        let meeting = identity::identity(derived, Slot::A);
+        on_status: impl Fn(Status),
+    ) -> Result<Connected<DataStream>, ConnectError> {
+        let address = identity::identity(derived, Slot::A).address;
+        on_status(Status::WaitingForPeer);
+        let deadline = tokio::time::Instant::now() + MEET_TIMEOUT;
 
-        let outcome = match role {
-            Role::Host => {
-                on_status(Status::PublishingService);
-
-                // Process-unique nickname. `round` alone is not enough: a caller
-                // that reuses one TorTransport across separate connects (as the
-                // app does) passes round=0 each time and would collide on the
-                // keystore. The shared LAUNCH_COUNTER guarantees uniqueness
-                // across every launch in the process. `round` is unused now but
-                // kept in the signature for the tests that drive this directly.
-                let _ = round;
-                let n = LAUNCH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let nickname = HsNickname::new(format!("narco{n}"))
-                    .map_err(|e| TorError::Config(e.to_string()))?;
-                let svc_config = OnionServiceConfigBuilder::default()
-                    .nickname(nickname)
-                    .build()
-                    .map_err(|e| TorError::Config(e.to_string()))?;
-
-                let (service, rend_requests) = self
-                    .client
-                    .launch_onion_service_with_hsid(svc_config, meeting.into_keypair())
-                    .map_err(|e| TorError::Launch(e.to_string()))?
-                    .ok_or(TorError::KeystoreDisabled)?;
-
-                on_status(Status::WaitingForPeer);
-
-                let accept = async {
-                    let mut streams = handle_rend_requests(rend_requests);
-                    while let Some(request) = streams.next().await {
-                        if let Ok(stream) = request.accept(Connected::new_empty()).await {
-                            return stream;
-                        }
-                        // A failed accept is not fatal; the peer may retry.
-                    }
-                    futures::future::pending().await
-                };
-
-                let got = tokio::select! {
-                    stream = accept => Some(stream),
-                    _ = tokio::time::sleep(ROUND_TIMEOUT) => None,
-                };
-                // Dropping the service unpublishes it, so a timed-out round
-                // leaves nothing behind for the next one to collide with.
-                drop(service);
-                got
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ConnectError::TimedOut);
             }
-
-            Role::Dial => {
-                on_status(Status::WaitingForPeer);
-                let address = meeting.address.clone();
-                let dial = async {
-                    loop {
-                        match self.client.connect((address.as_str(), VIRTUAL_PORT)).await {
-                            Ok(stream) => return stream,
-                            // Expected while the peer has not published yet.
-                            Err(_) => tokio::time::sleep(DIAL_RETRY).await,
+            match self.client.connect((address.as_str(), VIRTUAL_PORT)).await {
+                Ok(stream) => {
+                    on_status(Status::PeerFound);
+                    match run_handshake(stream, derived).await {
+                        Ok(conn) => return Ok(conn),
+                        // Reached the host but the codes differ — retrying will
+                        // not help, so surface it.
+                        Err(ConnectError::Protocol(ProtoError::ConfirmMismatch)) => {
+                            return Err(ConnectError::Protocol(ProtoError::ConfirmMismatch))
+                        }
+                        // Transient; wait and try again.
+                        Err(_) => {
+                            on_status(Status::WaitingForPeer);
+                            tokio::time::sleep(DIAL_RETRY).await;
                         }
                     }
-                };
-                tokio::select! {
-                    stream = dial => Some(stream),
-                    _ = tokio::time::sleep(ROUND_TIMEOUT) => None,
+                }
+                // Host has not published yet — expected; keep trying.
+                Err(_) => {
+                    on_status(Status::WaitingForPeer);
+                    tokio::time::sleep(DIAL_RETRY).await;
                 }
             }
-        };
-
-        Ok(outcome)
+        }
     }
 }
 
@@ -535,66 +433,26 @@ fn install_crypto_provider() {
     });
 }
 
-/// A fair coin flip from the OS CSPRNG.
-///
-/// Deliberately *not* derived from the room code. A derived choice would be
-/// identical on both devices, so they would forever pick the same role and
-/// never connect.
-fn random_role() -> Role {
-    let mut b = [0u8; 1];
-    getrandom::fill(&mut b).expect("OS CSPRNG unavailable");
-    if b[0] & 1 == 0 {
-        Role::Host
-    } else {
-        Role::Dial
-    }
-}
-
-/// Keeps a launched service alive for as long as it is held.
-pub type ServiceHandle = Arc<tor_hsservice::RunningOnionService>;
-
-/// An in-progress meeting: a live service plus the candidate connections.
-pub struct Meeting {
-    /// Drop this once the handshake confirms. Dropping unpublishes the address,
-    /// so no third party can connect — this is the "only two people" guarantee.
-    pub service: ServiceHandle,
-    /// Candidate connections, from both the accept and dial sides. Run a
-    /// `Session` per candidate; discard any that fails with `Error::Reflection`
-    /// (that one is us) and keep the first that reaches `Ready`.
-    pub candidates: tokio::sync::mpsc::Receiver<DataStream>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Host and joiner must derive the *same* meeting address from the code, or
+    /// they would never find each other.
     #[test]
-    fn coin_flip_reaches_both_roles() {
-        // With 200 flips, seeing only one role would mean p < 2^-199.
-        let mut saw_host = false;
-        let mut saw_dial = false;
-        for _ in 0..200 {
-            match random_role() {
-                Role::Host => saw_host = true,
-                Role::Dial => saw_dial = true,
-            }
-        }
-        assert!(saw_host && saw_dial, "coin flip is biased or broken");
-    }
-
-    /// Guards the fix for the two-connection deadlock: both peers must resolve
-    /// to the *same* meeting address, so exactly one connection can form.
-    #[test]
-    fn both_roles_target_one_shared_address() {
+    fn host_and_joiner_target_one_shared_address() {
         let d = narco_proto::kdf::derive("PWXK7M2QRT9HFZ").unwrap();
         let host_sees = identity::identity(&d, Slot::A).address;
-        let dial_sees = identity::identity(&d, Slot::A).address;
-        assert_eq!(host_sees, dial_sees);
+        let join_sees = identity::identity(&d, Slot::A).address;
+        assert_eq!(host_sees, join_sees);
     }
 
     #[test]
     fn status_is_comparable_for_ui_dedup() {
         assert_eq!(Status::WaitingForPeer, Status::WaitingForPeer);
-        assert_ne!(Status::Retrying { round: 1 }, Status::Retrying { round: 2 });
+        assert_ne!(
+            Status::BootstrappingTor { percent: 1 },
+            Status::BootstrappingTor { percent: 2 }
+        );
     }
 }

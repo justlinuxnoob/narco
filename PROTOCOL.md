@@ -398,30 +398,35 @@ is needed. Verify it yourself:
 cargo run -p narco-tor --example derive -- "YOUR-CODE"
 ```
 
-### 11.2 Meeting without negotiation
+### 11.2 Host and join
 
-A connection needs a listener and a dialler, and the peers cannot agree on which
-is which before they are connected. **Both do both.** Their descriptors collide
-in the Tor directory and one wins, supplying the asymmetry:
+The two roles are **explicit**, chosen by the humans like a phone call: one taps
+*start & host*, the other taps *join*.
 
-| | accepts | its own dial reaches |
-| --- | --- | --- |
-| descriptor **won** | the other peer | itself |
-| descriptor **lost** | nobody | the winner |
+- The **host** publishes an onion service at the address and accepts inbound
+  connections.
+- The **joiner** dials that address and never publishes.
 
-Exactly one real pairing forms, plus one self-connection. Each candidate gets its
-own [`Session`](#3-handshake--spake2); the self-connection is rejected by the
-§3.1 reflection check and discarded. This converges on the first attempt.
+Because only the host publishes and only the joiner dials, **a device never
+connects to itself** — there is no self-connection to detect, and there are
+never two services competing to publish one address. An earlier symmetric
+design (both publish and dial, resolve by descriptor collision) was removed: it
+could complete a SPAKE2 handshake with itself, and running two services at one
+address is a genuinely hard problem (cf. OnionBalance).
 
-A coin-flipped host/dial role was tried first and rejected: it fails half the
-time, and a failure is only detectable by timeout — which must be minutes long,
-because descriptor propagation is.
+The host accepts connections in a loop: it runs the §3 handshake over each, and
+a connection that fails key confirmation (a stray connector, or someone who
+typed a different code) is dropped while the host keeps waiting for the real
+peer.
 
 ### 11.3 Enforcing "only ever two"
 
-The moment the handshake confirms, the onion service is **dropped, which
-unpublishes the address**. There is no longer anything to connect to, so a third
-party cannot join. This is structural, not a check that could be bypassed.
+There is **no unpublish operation** in the onion-service protocol — a descriptor
+lingers in the directory until it expires (up to a few hours). So the two-person
+guarantee is enforced in code, not assumed: the instant the handshake confirms,
+the host stops accepting and **drops the service**, which tears down its
+introduction points. With the intro points gone, the lingering descriptor points
+at nothing, so no third party can establish a new connection.
 
 ### 11.4 Keys and disk
 

@@ -1,15 +1,11 @@
-//! Live end-to-end proof over the real Tor network.
+//! Live end-to-end proof of the host/join architecture over real Tor.
 //!
 //!     cargo run -p narco-tor --example live_handshake
 //!
-//! Two peers, one shared code, no server anywhere. Each derives the same onion
-//! address from the code, both publish *and* dial it, discard the connection to
-//! their own service, and settle on the one real pairing. Then they run the
-//! SPAKE2 handshake and exchange encrypted messages.
-//!
-//! Two independent Tor clients are used, matching two real installs. Expect a
-//! few minutes: bootstrap, descriptor publish, and directory propagation are
-//! all genuinely slow.
+//! One peer hosts the onion service, the other joins (dials only). They complete
+//! the SPAKE2 handshake and exchange an encrypted message. Two independent Tor
+//! clients with separate state directories, matching two real installs. No
+//! device connects to itself, because only the host publishes.
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use narco_proto::Event;
@@ -26,7 +22,7 @@ async fn chat<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     mut c: Connected<S>,
     greeting: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    println!("[{name}] handshake confirmed — encryption is live");
+    println!("[{name}] connected — encrypted");
     send_frame(&mut c.stream, &c.session.encrypt(greeting.as_bytes())?).await?;
     let frame = recv_frame(&mut c.stream).await?;
     match c.session.handle(&frame)? {
@@ -38,45 +34,42 @@ async fn chat<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let started = Instant::now();
-
-    // Two secrets, as two people would use them: one messaged, one spoken.
     let derived = narco_proto::derive_multi(&[CODE, PASSPHRASE])?;
     let (addr, _) = narco_tor::identities(&derived);
-    println!("code          {CODE}");
-    println!("passphrase    {PASSPHRASE:?}");
-    println!("meeting at    {}", addr.address);
-    println!("\nbootstrapping two independent Tor clients...");
+    println!("meeting at {}\n", addr.address);
 
-    // Distinct state dirs: two clients in one process would otherwise fight
+    // Distinct state dirs so two clients can share one machine without fighting
     // over Tor's on-disk cache lock. Separate installs never hit this.
     let tmp = std::env::temp_dir().join("narco-live-test");
-    let (p1, p2) = (tmp.join("peer1"), tmp.join("peer2"));
-    let (t1, t2) = tokio::try_join!(
-        TorTransport::bootstrap_in(Some(&p1), |s| println!("  [peer1] {s:?}")),
-        TorTransport::bootstrap_in(Some(&p2), |s| println!("  [peer2] {s:?}")),
+    let (host_dir, join_dir) = (tmp.join("host"), tmp.join("join"));
+    let (host_tor, join_tor) = tokio::try_join!(
+        TorTransport::bootstrap_in(Some(&host_dir), |s| println!("  [host-tor] {s:?}")),
+        TorTransport::bootstrap_in(Some(&join_dir), |s| println!("  [join-tor] {s:?}")),
     )?;
     println!("bootstrapped in {:?}\n", started.elapsed());
 
-    let (d1, d2) = (derived.clone(), derived.clone());
-    let (c1, c2) = tokio::try_join!(
-        narco_tor::connect(&t1, &d1, |s: Status| println!("  [peer1] {s:?}")),
-        narco_tor::connect(&t2, &d2, |s: Status| println!("  [peer2] {s:?}")),
+    let (dh, dj) = (derived.clone(), derived.clone());
+    let (hc, jc) = tokio::try_join!(
+        host_tor.host(&dh, |s: Status| println!("  [host] {s:?}")),
+        join_tor.join(&dj, |s: Status| println!("  [join] {s:?}")),
     )?;
     println!("\nconnected over Tor in {:?}\n", started.elapsed());
 
     let (a, b) = tokio::join!(
-        chat("peer1", c1, "hello from peer one"),
-        chat("peer2", c2, "hello from peer two"),
+        chat("host", hc, "hello from the host"),
+        chat("join", jc, "hello from the joiner"),
     );
     let (a, b) = (a?, b?);
 
-    println!("\npeer1 received: {a:?}");
-    println!("peer2 received: {b:?}");
-    assert_eq!(a, "hello from peer two");
-    assert_eq!(b, "hello from peer one");
+    println!("\nhost received: {a:?}");
+    println!("join received: {b:?}");
+    assert_eq!(a, "hello from the joiner");
+    assert_eq!(b, "hello from the host");
 
-    println!("\nLIVE TOR END-TO-END PASSED in {:?}", started.elapsed());
-    println!("No server was involved at any point.");
-    println!("The address is now unpublished — nobody else can join.");
+    println!(
+        "\nLIVE host/join END-TO-END PASSED in {:?}",
+        started.elapsed()
+    );
+    println!("Host published, joiner dialled — no self-connection possible, no server.");
     Ok(())
 }

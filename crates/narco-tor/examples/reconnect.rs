@@ -1,14 +1,15 @@
-//! Reproduce the keystore-reuse bug: two sequential connects on ONE Tor client.
+//! Reproduce the keystore-reuse bug against the host/join API: reuse one Tor
+//! client to host TWICE in a row.
 //!
 //!     cargo run -p narco-tor --example reconnect
 //!
-//! Before the unique-nickname fix, the second launch failed with a
-//! "bad api usage / keystore" error (KeyAlreadyExists). This drives two peers
-//! (A hosts, B dials) twice in a row, reusing the same TorTransport for A —
-//! exactly what the GUI does when a user retries after a disconnect.
+//! Before the unique-nickname fix, the second `host()` failed with a
+//! "bad api usage / keystore" error (KeyAlreadyExists), because the onion
+//! service was relaunched under the same nickname. This drives two full
+//! host/join connections back to back, reusing the same host transport — the
+//! exact condition the app hits when a user starts a second chat.
 
-use narco_tor::transport::{Role, Status};
-use narco_tor::TorTransport;
+use narco_tor::{Status, TorTransport};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,35 +19,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let quiet = |_: Status| {};
 
     let base = std::env::temp_dir().join("narco-reconnect");
-    let a = Arc::new(TorTransport::bootstrap_in(Some(&base.join("a")), quiet).await?);
-    let b = Arc::new(TorTransport::bootstrap_in(Some(&base.join("b")), quiet).await?);
+    let host = Arc::new(TorTransport::bootstrap_in(Some(&base.join("host")), quiet).await?);
+    let join = Arc::new(TorTransport::bootstrap_in(Some(&base.join("join")), quiet).await?);
     println!("both bootstrapped\n");
 
     for attempt in 1..=2u32 {
         let t0 = Instant::now();
-        // A reuses the SAME transport across both attempts — the exact condition
-        // that triggered the keystore error on the second launch.
-        let (ra, rb) = (a.clone(), b.clone());
-        let da = derived.clone();
-        let db = derived.clone();
-        let host = tokio::spawn(async move { ra.meet_once(&da, Role::Host, 0, &|_| {}).await });
-        let dial = tokio::spawn(async move { rb.meet_once(&db, Role::Dial, 0, &|_| {}).await });
+        // The host reuses the SAME transport (and its ephemeral keystore) on
+        // both attempts — the condition that triggered KeyAlreadyExists.
+        let (h, j) = (host.clone(), join.clone());
+        let (dh, dj) = (derived.clone(), derived.clone());
+        let hs = tokio::spawn(async move { h.host(&dh, |_| {}).await });
+        let js = tokio::spawn(async move { j.join(&dj, |_| {}).await });
 
-        match tokio::try_join!(host, dial) {
-            Ok((Ok(Some(_)), Ok(Some(_)))) => {
-                println!("attempt {attempt}: CONNECTED in {:?}", t0.elapsed());
-            }
-            Ok((h, d)) => {
-                println!("attempt {attempt}: FAILED host={h:?} dial={d:?}");
-                std::process::exit(1);
-            }
-            Err(e) => {
-                println!("attempt {attempt}: JOIN ERROR {e}");
+        // Connected has no Debug (it holds a live stream), so report only the
+        // errors, which do implement Display.
+        let (hr, jr) = tokio::try_join!(hs, js)?;
+        match (hr, jr) {
+            (Ok(_), Ok(_)) => println!("attempt {attempt}: CONNECTED in {:?}", t0.elapsed()),
+            (h, j) => {
+                let he = h.err().map(|e| e.to_string()).unwrap_or_default();
+                let je = j.err().map(|e| e.to_string()).unwrap_or_default();
+                println!("attempt {attempt}: FAILED host_err=[{he}] join_err=[{je}]");
                 std::process::exit(1);
             }
         }
     }
 
-    println!("\nRECONNECT OK — reusing one Tor client across two connects works");
+    println!("\nRECONNECT OK — reusing one Tor client to host twice works");
     Ok(())
 }

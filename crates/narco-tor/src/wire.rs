@@ -1,34 +1,16 @@
-//! Length-prefixed framing and the candidate-racing handshake.
+//! Length-prefixed framing and the peer handshake.
 //!
-//! [`TorTransport::meet_candidates`](crate::TorTransport::meet_candidates) can
-//! hand back a connection to our *own* service. This module is what turns that
-//! stream of maybes into one confirmed peer.
+//! [`run_handshake`] takes one established connection and runs the SPAKE2
+//! handshake over it. It is used identically by the host (over an accepted
+//! connection) and the joiner (over a dialled one).
 
-use crate::transport::{Meeting, Status, TorTransport};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use narco_proto::kdf::Derived;
 use narco_proto::{Error as ProtoError, Event, Session};
-use std::time::Duration;
 
 /// Upper bound on a single frame. The largest legitimate frame is a 64 KiB
 /// padding bucket plus AEAD and framing overhead.
 pub const MAX_FRAME: usize = 128 * 1024;
-
-/// Give up on a peer that never appears.
-///
-/// Deliberately far longer than a connection takes. A measured cold connect is
-/// around 258 s, so the previous 300 s left a 42-second margin — meaning the
-/// two people had to press start within about forty seconds of each other or
-/// the first one gave up before the second was ready. Waiting costs nothing;
-/// the user can cancel whenever they like.
-const MEET_TIMEOUT: Duration = Duration::from_secs(1800);
-
-/// Give up on a candidate that stalls mid-handshake.
-///
-/// The handshake is two round trips over an already-established circuit, so a
-/// live peer answers in seconds. A candidate still silent after this is our own
-/// service, and no longer blocks anything now that candidates run concurrently.
-const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub enum ConnectError {
@@ -89,106 +71,42 @@ pub async fn recv_frame<S: AsyncReadExt + Unpin>(s: &mut S) -> std::io::Result<V
     Ok(buf)
 }
 
-/// Run the SPAKE2 handshake over one candidate connection.
-///
-/// Returns `Ok(None)` when the candidate is not a real peer — our own service,
-/// or someone who does not know the secrets. Neither is fatal; the caller simply
-/// moves to the next candidate.
-async fn try_candidate<S: AsyncReadExt + AsyncWriteExt + Unpin>(
-    stream: &mut S,
-    derived: &Derived,
-) -> Result<Option<Session>, ConnectError> {
-    let mut session = Session::from_derived(derived);
-    send_frame(stream, &session.pake_frame()).await?;
-
-    loop {
-        let frame = match recv_frame(stream).await {
-            Ok(f) => f,
-            // A dead or hung-up candidate is not a failure of the whole attempt.
-            Err(_) => return Ok(None),
-        };
-        match session.handle(&frame) {
-            Ok(Event::Send(out)) => send_frame(stream, &out).await?,
-            Ok(Event::Ready) => return Ok(Some(session)),
-            Ok(Event::Message(_)) => return Ok(None), // Impossible before Ready.
-            // `Reflection` means we connected to ourselves; `ConfirmMismatch`
-            // means the far side does not know the secrets. Both are expected
-            // and are simply skipped.
-            Err(ProtoError::Reflection) | Err(ProtoError::ConfirmMismatch) => return Ok(None),
-            Err(e) => return Err(e.into()),
-        }
-    }
-}
-
 /// A confirmed, encrypted connection to exactly one other person.
 pub struct Connected<S> {
     pub session: Session,
     pub stream: S,
 }
 
-/// Meet the peer over Tor and return a confirmed encrypted session.
+/// Run the SPAKE2 handshake over a single connection and return the confirmed
+/// session, or an error saying why it failed.
 ///
-/// Races every candidate connection until one completes the handshake, then
-/// **unpublishes the onion address** so nobody else can join.
-pub async fn connect(
-    transport: &TorTransport,
+/// This is the whole security handshake, shared by both the host and the
+/// joiner. It is symmetric — it does not care which side published the onion
+/// service — so both ends run exactly this.
+///
+/// Errors the caller should treat as "this particular connection is not our
+/// peer" (a stray connector, or someone who typed a different code):
+/// [`ConnectError::Protocol`] wrapping [`ProtoError::ConfirmMismatch`] or
+/// [`ProtoError::Reflection`]. An [`ConnectError::Io`] means the connection
+/// dropped mid-handshake.
+pub async fn run_handshake<S>(
+    mut stream: S,
     derived: &Derived,
-    on_status: impl Fn(Status),
-) -> Result<Connected<arti_client::DataStream>, ConnectError> {
-    let Meeting {
-        service,
-        mut candidates,
-    } = transport.meet_candidates(derived, &on_status).await?;
-
-    let deadline = tokio::time::Instant::now() + MEET_TIMEOUT;
-
-    // Candidates are handshaken *concurrently*, not one after another.
-    //
-    // Connecting to our own service is normal here — it is how the shared
-    // address works — and such a candidate never completes a handshake, so it
-    // simply hangs until its timeout. Trying candidates sequentially let a few
-    // of those queue ahead of the peer's real connection and consume the whole
-    // budget before it was ever attempted, which looked exactly like "the other
-    // person never arrived".
-    let mut running = tokio::task::JoinSet::new();
+) -> Result<Connected<S>, ConnectError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let mut session = Session::from_derived(derived);
+    send_frame(&mut stream, &session.pake_frame()).await?;
 
     loop {
-        tokio::select! {
-            // A new candidate arrived: start its handshake alongside the others.
-            next = tokio::time::timeout_at(deadline, candidates.recv()) => {
-                match next {
-                    Ok(Some(mut stream)) => {
-                        let derived = derived.clone();
-                        running.spawn(async move {
-                            let out = tokio::time::timeout(
-                                CANDIDATE_TIMEOUT,
-                                try_candidate(&mut stream, &derived),
-                            )
-                            .await;
-                            match out {
-                                Ok(Ok(Some(session))) => Some((session, stream)),
-                                _ => None,
-                            }
-                        });
-                    }
-                    // Channel closed, or the overall deadline passed.
-                    _ => return Err(ConnectError::TimedOut),
-                }
-            }
-
-            // One of the in-flight handshakes finished.
-            Some(done) = running.join_next(), if !running.is_empty() => {
-                if let Ok(Some((session, stream))) = done {
-                    on_status(Status::PeerFound);
-                    // Both people are in. Take the door away: dropping the
-                    // service unpublishes the address, so nobody else can join.
-                    drop(service);
-                    drop(candidates);
-                    running.abort_all();
-                    return Ok(Connected { session, stream });
-                }
-                // Not a real peer. The others keep going.
-            }
+        let frame = recv_frame(&mut stream).await?;
+        match session.handle(&frame) {
+            Ok(Event::Send(out)) => send_frame(&mut stream, &out).await?,
+            Ok(Event::Ready) => return Ok(Connected { session, stream }),
+            // A message before Ready is impossible in a well-behaved peer.
+            Ok(Event::Message(_)) => return Err(ConnectError::Protocol(ProtoError::WrongPhase)),
+            Err(e) => return Err(ConnectError::Protocol(e)),
         }
     }
 }

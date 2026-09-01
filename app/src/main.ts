@@ -81,7 +81,8 @@ function addSecret(focus = false) {
   input.autocomplete = "off";
   input.spellcheck = false;
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") start();
+    // Enter defaults to the primary action (host); the joiner taps "join".
+    if (e.key === "Enter") start(true);
   });
 
   // Every secret gets its own generate, not just the first — a hand-typed
@@ -188,7 +189,7 @@ function stopElapsed() {
 
 // --- entry ----------------------------------------------------------------
 
-async function start() {
+async function start(host: boolean) {
   const secrets = secretInputs()
     .map((i) => i.value.trim())
     .filter((s) => s.length > 0);
@@ -210,28 +211,50 @@ async function start() {
   setError("");
   $("status").textContent = "Starting…";
   setStage("tor");
+
+  // The host shares the code, so keep it visible on the connecting screen.
+  const share = $("share");
+  if (host) {
+    $("share-code").textContent = secrets[0];
+    share.hidden = false;
+  } else {
+    share.hidden = true;
+  }
+
   show("connecting");
   startElapsed();
 
   const idleSecs = Number($<HTMLSelectElement>("idle").value);
   try {
-    await invoke("connect", { secrets, idleSecs });
+    await invoke("connect", { secrets, idleSecs, host });
   } catch (e) {
     endWith(String(e));
   }
 }
 
-// Start is disabled until Tor is ready — pressing it earlier would just wait
-// on a connection that hasn't happened yet, which looks broken.
-const startBtn = $<HTMLButtonElement>("start");
-startBtn.disabled = true;
-startBtn.textContent = "connecting to tor…";
-startBtn.addEventListener("click", start);
+// Both actions are disabled until Tor is ready — pressing earlier would just
+// wait on a connection that hasn't happened yet, which looks broken.
+const hostBtn = $<HTMLButtonElement>("host");
+const joinBtn = $<HTMLButtonElement>("join");
+hostBtn.disabled = true;
+joinBtn.disabled = true;
+hostBtn.textContent = "connecting to tor…";
+hostBtn.addEventListener("click", () => start(true));
+joinBtn.addEventListener("click", () => start(false));
+$("share-copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("share-code").textContent ?? "");
+    flash($<HTMLButtonElement>("share-copy"), "ok");
+  } catch {
+    /* clipboard may be unavailable; the code is on screen to copy by hand */
+  }
+});
 
-/** Reflect Tor readiness on the start button. */
+/** Reflect Tor readiness on the two action buttons. */
 function setStartReady(ready: boolean) {
-  startBtn.disabled = !ready;
-  startBtn.textContent = ready ? "start" : "connecting to tor…";
+  hostBtn.disabled = !ready;
+  joinBtn.disabled = !ready;
+  hostBtn.textContent = ready ? "start & host" : "connecting to tor…";
 }
 
 $("cancel").addEventListener("click", async () => {
