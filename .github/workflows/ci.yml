@@ -3,6 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
+    # A release pushes main and a tag together; without this both workflows run
+    # and compete for runners for the same commit.
+    tags-ignore: ["v*"]
   pull_request:
   workflow_dispatch:
 
