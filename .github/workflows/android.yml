@@ -103,6 +103,15 @@ jobs:
           done
           find "$JNI" -name 'libTor.so' -printf '%p %s bytes\n'
 
+          # tauri.conf.json declares resources: ["tor/*"] for the desktop
+          # builds, and the build script treats a glob that matches nothing as
+          # a hard error. tauri.android.conf.json clears that list, but this
+          # placeholder keeps the glob satisfied either way — the daemon itself
+          # travels in jniLibs above, not as a resource.
+          mkdir -p app/src-tauri/tor
+          echo "The tor daemon ships in jniLibs on Android; see android.yml." \
+            > app/src-tauri/tor/README.txt
+
       # A debug-signed APK: installable on a real phone straight away, which a
       # release APK is not without a signing key. Publishing signed builds needs
       # a keystore held as a repository secret — a decision for the repo owner,
