@@ -25,10 +25,40 @@ async fn chat<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     println!("[{name}] connected — encrypted");
     send_frame(&mut c.stream, &c.session.encrypt(greeting.as_bytes())?).await?;
     let frame = recv_frame(&mut c.stream).await?;
-    match c.session.handle(&frame)? {
-        Event::Message(m) => Ok(String::from_utf8(m)?),
+    let short = match c.session.handle(&frame)? {
+        Event::Message(m) => String::from_utf8(m)?,
         other => panic!("[{name}] expected a message, got {other:?}"),
-    }
+    };
+
+    // A long message, because that is the case that used to break.
+    //
+    // Padding buckets step 256 → 1024, so anything past roughly 230 characters
+    // spans several reads. `recv_frame` is two sequential `read_exact` calls
+    // and is not cancellation-safe, and it used to sit in a `select!` arm — so
+    // a message arriving while the user sent one lost the bytes already taken
+    // off the socket, and the session died claiming the peer had tampered with
+    // it. Anything short never triggered it, which is why it survived so long.
+    let long = format!(
+        "{name}: {}",
+        "the quick brown fox jumps over the lazy dog. ".repeat(12)
+    );
+    assert!(long.len() > 300, "the long case has to actually be long");
+    send_frame(&mut c.stream, &c.session.encrypt(long.as_bytes())?).await?;
+    let frame = recv_frame(&mut c.stream).await?;
+    let echoed = match c.session.handle(&frame)? {
+        Event::Message(m) => String::from_utf8(m)?,
+        other => panic!("[{name}] expected the long message, got {other:?}"),
+    };
+    println!(
+        "[{name}] long message survived the round trip: {} bytes",
+        echoed.len()
+    );
+    assert!(
+        echoed.len() > 300,
+        "[{name}] long message came back truncated"
+    );
+
+    Ok(short)
 }
 
 #[tokio::main]

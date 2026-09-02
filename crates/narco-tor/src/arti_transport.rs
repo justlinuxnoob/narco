@@ -42,6 +42,13 @@ const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(180);
 /// may press Start and Join minutes apart — and the user can cancel any time.
 const MEET_TIMEOUT: Duration = Duration::from_secs(1800);
 
+/// How many wrong secrets a host will answer before giving up. See the same
+/// constant in [`crate::transport`] for why.
+const MAX_WRONG_SECRETS: u32 = 5;
+
+/// Added to the wait after each wrong secret, so guessing gets slower.
+const GUESS_BACKOFF: Duration = Duration::from_secs(2);
+
 /// Pause between dial attempts while joining. The host may not have published
 /// yet, so early failures are expected rather than fatal.
 const DIAL_RETRY: Duration = Duration::from_secs(4);
@@ -294,6 +301,7 @@ impl TorTransport {
 
         let mut streams = handle_rend_requests(rend_requests);
         let deadline = tokio::time::Instant::now() + MEET_TIMEOUT;
+        let mut wrong_secrets = 0u32;
 
         loop {
             let request = match tokio::time::timeout_at(deadline, streams.next()).await {
@@ -315,10 +323,20 @@ impl TorTransport {
                     drop(service);
                     return Ok(conn);
                 }
-                // A stray connector or someone who typed a different code. Keep
-                // the service up and wait for the real peer.
-                Err(ConnectError::Protocol(ProtoError::ConfirmMismatch))
-                | Err(ConnectError::Protocol(ProtoError::Reflection)) => {
+                // Someone arrived with the wrong secret. Each one is a guess,
+                // so they get slower and then stop.
+                Err(ConnectError::Protocol(ProtoError::ConfirmMismatch)) => {
+                    wrong_secrets += 1;
+                    if wrong_secrets >= MAX_WRONG_SECRETS {
+                        drop(service);
+                        return Err(ConnectError::Protocol(ProtoError::ConfirmMismatch));
+                    }
+                    tokio::time::sleep(GUESS_BACKOFF * wrong_secrets).await;
+                    on_status(Status::WaitingForPeer);
+                    continue;
+                }
+                // Not a guess, so it does not count against the limit.
+                Err(ConnectError::Protocol(ProtoError::Reflection)) => {
                     on_status(Status::WaitingForPeer);
                     continue;
                 }

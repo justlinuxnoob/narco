@@ -42,6 +42,18 @@ const MEET_TIMEOUT: Duration = Duration::from_secs(1800);
 /// yet, so early failures are expected rather than fatal.
 const DIAL_RETRY: Duration = Duration::from_secs(4);
 
+/// How many wrong secrets a host will answer before giving up.
+///
+/// SPAKE2 grants one guess per connection, which is the intended bound — but
+/// nothing limited how many connections an attacker could make, so anyone who
+/// learned the onion address had unlimited attempts for the whole meet window.
+/// A person who mistypes gets several tries; someone working through a
+/// dictionary does not.
+const MAX_WRONG_SECRETS: u32 = 5;
+
+/// Added to the wait after each wrong secret, so guessing gets slower.
+const GUESS_BACKOFF: Duration = Duration::from_secs(2);
+
 /// Cap on a single handshake once a connection exists.
 ///
 /// `MEET_TIMEOUT` bounds only the wait for a connection, not what happens on
@@ -121,6 +133,7 @@ impl TorTransport {
 
         on_status(Status::WaitingForPeer);
         let deadline = tokio::time::Instant::now() + MEET_TIMEOUT;
+        let mut wrong_secrets = 0u32;
 
         let result = loop {
             let accepted = tokio::time::timeout_at(deadline, listener.accept()).await;
@@ -134,11 +147,20 @@ impl TorTransport {
                 tokio::time::timeout(HANDSHAKE_TIMEOUT, run_handshake(stream, derived)).await;
             match handshake {
                 Ok(Ok(conn)) => break Ok(conn),
-                // A stray connector, someone who typed different secrets, or
-                // one that went quiet. Keep the service up and wait for the
-                // real peer.
-                Ok(Err(ConnectError::Protocol(ProtoError::ConfirmMismatch)))
-                | Ok(Err(ConnectError::Protocol(ProtoError::Reflection)))
+                // Someone arrived with the wrong secret. Each one is a guess,
+                // so they get slower and then stop.
+                Ok(Err(ConnectError::Protocol(ProtoError::ConfirmMismatch))) => {
+                    wrong_secrets += 1;
+                    if wrong_secrets >= MAX_WRONG_SECRETS {
+                        break Err(ConnectError::Protocol(ProtoError::ConfirmMismatch));
+                    }
+                    tokio::time::sleep(GUESS_BACKOFF * wrong_secrets).await;
+                    on_status(Status::WaitingForPeer);
+                    continue;
+                }
+                // A stray connector, or one that went quiet. Not a guess, so
+                // it does not count against the limit.
+                Ok(Err(ConnectError::Protocol(ProtoError::Reflection)))
                 | Ok(Err(ConnectError::Io(_)))
                 | Err(_) => {
                     on_status(Status::WaitingForPeer);

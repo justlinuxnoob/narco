@@ -33,6 +33,15 @@ enum UiEvent {
     Message { text: String },
     /// Session over. `reason` is shown to the user.
     Ended { reason: String },
+    /// The connection dropped and is being re-established. The conversation is
+    /// not over and the message history stays on screen.
+    Reconnecting,
+    /// Back. A fresh handshake completed at the same address.
+    Reconnected,
+    /// The idle timeout is about to fire, or has been called off because
+    /// something happened. Ending a chat with no warning is an ambush; this
+    /// gives the user a chance to stay.
+    IdleWarning { seconds_left: u32, active: bool },
     /// Progress joining Tor, reported while the user is still typing.
     TorProgress {
         text: String,
@@ -122,7 +131,12 @@ fn emit(app: &AppHandle, e: UiEvent) {
     // coarse connection state.
     let line = match &e {
         UiEvent::Status { text, stage } => Some(format!("[narco] status[{stage}] {text}")),
+        UiEvent::IdleWarning { active, .. } => {
+            Some(format!("[narco] idle warning {}", if *active { "shown" } else { "cleared" }))
+        }
         UiEvent::Ready => Some("[narco] handshake confirmed — chat live".to_string()),
+        UiEvent::Reconnecting => Some("[narco] connection lost — reconnecting".to_string()),
+        UiEvent::Reconnected => Some("[narco] reconnected".to_string()),
         UiEvent::Ended { reason } => Some(format!("[narco] ended: {reason}")),
         UiEvent::TorProgress {
             text,
@@ -307,6 +321,13 @@ async fn connect(
     Ok(())
 }
 
+/// How many times a dropped connection is chased before giving up. Generous:
+/// a phone that spent a while in the background may need several.
+const MAX_RECONNECTS: u32 = 20;
+
+/// How long before the idle timeout the user is warned.
+const IDLE_WARNING: Duration = Duration::from_secs(60);
+
 /// Owns the session and its stream for the whole conversation.
 ///
 /// Returns the reason the session ended. Every exit path drops the `Session`,
@@ -332,6 +353,20 @@ async fn run_session(
         Err(e) => return e,
     };
 
+    // Reconnect instead of ending when the connection drops on its own.
+    //
+    // A phone suspends a backgrounded app and closes its sockets, so switching
+    // apps for a moment would otherwise end the conversation — and the secrets
+    // are still here, so there is nothing to ask the user for. The address is
+    // derived from them, so reconnecting means publishing and dialling the same
+    // place again.
+    //
+    // A fresh handshake runs each time, with new ephemerals and new session
+    // keys, so nothing is weakened by doing this: it is a new session at the
+    // same address, not a resumed one.
+    let mut reconnects = 0u32;
+
+    let reason = 'connection: loop {
     let app_status = app.clone();
     let cb = move |s| emit_status(&app_status, s);
     // The starter hosts the onion service; the joiner only dials it. One side
@@ -368,10 +403,26 @@ async fn run_session(
         stream,
     } = match connected {
         Ok(c) => c,
-        Err(e) => return e.to_string(),
+        Err(e) => {
+            // Failing to connect at all is the user's problem to see. Failing
+            // to get back is worth another try, since they were talking a
+            // moment ago.
+            if reconnects == 0 {
+                break 'connection e.to_string();
+            }
+            reconnects += 1;
+            if reconnects > MAX_RECONNECTS {
+                break 'connection "Lost the connection and could not get it back.".into();
+            }
+            continue 'connection;
+        }
     };
 
-    emit(app, UiEvent::Ready);
+    if reconnects == 0 {
+        emit(app, UiEvent::Ready);
+    } else {
+        emit(app, UiEvent::Reconnected);
+    }
 
     let (mut reader, mut writer) = tokio::io::split(stream);
 
@@ -398,25 +449,36 @@ async fn run_session(
         }
     });
 
+    // Cleared on any traffic, so a warning shown once does not stay on screen
+    // after the conversation resumes.
+    let mut idle_warned = false;
+
     let reason = 'session: loop {
         tokio::select! {
             // Peer traffic.
             frame = frame_rx.recv() => {
                 let Some(frame) = frame else {
-                    break 'session "The other person disconnected.".into();
+                    break 'session ("The other person disconnected.".to_string(), true);
                 };
+                if idle_warned {
+                    idle_warned = false;
+                    emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
+                }
                 match session.handle(&frame) {
                     Ok(Event::Message(m)) => match String::from_utf8(m) {
                         Ok(text) => emit(app, UiEvent::Message { text }),
-                        Err(_) => break 'session "Received a malformed message.".into(),
+                        Err(_) => break 'session ("Received a malformed message.".to_string(), false),
                     },
-                    Ok(_) => break 'session "Unexpected handshake frame.".into(),
+                    Ok(_) => break 'session ("Unexpected handshake frame.".to_string(), false),
                     // Any protocol error is terminal by design.
                     Err(ProtoError::Decrypt) | Err(ProtoError::OutOfOrder { .. }) => {
-                        break 'session
-                            "Message failed verification — session ended for safety.".into()
+                        break 'session (
+                            "Message failed verification — session ended for safety."
+                                .to_string(),
+                            false,
+                        )
                     }
-                    Err(e) => break 'session e.to_string(),
+                    Err(e) => break 'session (e.to_string(), false),
                 }
             }
 
@@ -424,10 +486,14 @@ async fn run_session(
             cmd = rx.recv() => {
                 match cmd {
                     Some(Cmd::Send(text)) => {
+                        if idle_warned {
+                            idle_warned = false;
+                            emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
+                        }
                         match session.encrypt(text.as_bytes()) {
                             Ok(frame) => {
                                 if send_frame(&mut writer, &frame).await.is_err() {
-                                    break 'session "The other person disconnected.".into();
+                                    break 'session ("The other person disconnected.".to_string(), true);
                                 }
                             }
                             Err(ProtoError::TooLong) => {
@@ -439,19 +505,31 @@ async fn run_session(
                                     },
                                 );
                             }
-                            Err(e) => break 'session e.to_string(),
+                            Err(e) => break 'session (e.to_string(), false),
                         }
                     }
-                    Some(Cmd::End) => break 'session "You ended the session.".into(),
-                    None => break 'session "Session closed.".into(),
+                    Some(Cmd::End) => break 'session ("You ended the session.".to_string(), false),
+                    None => break 'session ("Session closed.".to_string(), false),
                 }
             }
 
-            // Idle reaper.
+            // Idle reaper, in two stages. The first pass warns and the second
+            // ends it, so silence never closes a chat without notice. Any
+            // traffic resets both, because the whole select! restarts.
+            _ = tokio::time::sleep(idle.saturating_sub(IDLE_WARNING)) , if !idle_warned => {
+                idle_warned = true;
+                emit(app, UiEvent::IdleWarning {
+                    seconds_left: IDLE_WARNING.as_secs() as u32,
+                    active: true,
+                });
+            }
             _ = tokio::time::sleep(idle) => {
-                break 'session format!(
-                    "Session ended after {} minutes of silence.",
-                    idle.as_secs() / 60
+                break 'session (
+                    format!(
+                        "Session ended after {} minutes of silence.",
+                        idle.as_secs() / 60
+                    ),
+                    false,
                 );
             }
         }
@@ -461,8 +539,21 @@ async fn run_session(
     // holding the read half of the connection open, until the peer happened to
     // disconnect.
     reader_task.abort();
+
+    let (why, worth_retrying) = reason;
+    if !worth_retrying {
+        break 'connection why;
+    }
+    reconnects += 1;
+    if reconnects > MAX_RECONNECTS {
+        break 'connection why;
+    }
+    emit(app, UiEvent::Reconnecting);
+    // `session` drops here; Drop zeroizes every key. The next pass derives
+    // fresh ones from the secrets we still hold.
+    };
+
     reason
-    // `session` drops here; Drop zeroizes every key.
 }
 
 #[tauri::command]

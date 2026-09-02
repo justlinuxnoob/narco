@@ -15,6 +15,9 @@ type UiEvent =
   | { kind: "ready" }
   | { kind: "message"; text: string }
   | { kind: "ended"; reason: string }
+  | { kind: "idleWarning"; secondsLeft: number; active: boolean }
+  | { kind: "reconnecting" }
+  | { kind: "reconnected" }
   | { kind: "torProgress"; text: string; ready: boolean; failed: boolean };
 
 const $ = <T extends HTMLElement>(id: string) => {
@@ -354,6 +357,9 @@ const input = $<HTMLInputElement>("input");
 /** Timers for disappearing messages, so they can be cancelled on wipe. */
 const burnTimers: number[] = [];
 
+/** Ticks the idle countdown while it is on screen. */
+let idleCountdown: number | undefined;
+
 const burnSeconds = () => Number($<HTMLSelectElement>("burn").value);
 
 function addMessage(text: string, who: "me" | "them" | "note") {
@@ -394,6 +400,9 @@ $("end").addEventListener("click", () => invoke("end_session"));
 
 function endWith(reason: string) {
   stopElapsed();
+  if (idleCountdown !== undefined) clearInterval(idleCountdown);
+  idleCountdown = undefined;
+  $("idle-warning").hidden = true;
   for (const t of burnTimers.splice(0)) clearTimeout(t);
   // Destroy every trace of the conversation in the UI. Rust has already
   // zeroized the keys.
@@ -474,6 +483,40 @@ listen<UiEvent>("narco", ({ payload }) => {
     case "message":
       addMessage(payload.text, "them");
       break;
+    case "idleWarning": {
+      // Counts down rather than showing a fixed number, so it is obviously
+      // live and obviously avoidable — anything you send calls it off.
+      const el = $("idle-warning");
+      if (idleCountdown !== undefined) clearInterval(idleCountdown);
+      if (!payload.active) {
+        el.hidden = true;
+        break;
+      }
+      let left = payload.secondsLeft;
+      const tick = () => {
+        el.textContent = `No activity — this chat ends in ${left}s. Send anything to stay.`;
+        if (left-- <= 0 && idleCountdown !== undefined) clearInterval(idleCountdown);
+      };
+      tick();
+      el.hidden = false;
+      idleCountdown = window.setInterval(tick, 1000);
+      break;
+    }
+    // The conversation is not over, so the messages stay. Only the header
+    // changes, and the composer waits until there is somewhere to send.
+    case "reconnecting":
+      $("chat-mode").textContent = "reconnecting…";
+      $<HTMLInputElement>("input").disabled = true;
+      addMessage("Connection lost. Getting it back…", "note");
+      break;
+    case "reconnected": {
+      const secs = burnSeconds();
+      $("chat-mode").textContent = secs > 0 ? `encrypted · vanishing ${secs}s` : "encrypted";
+      $<HTMLInputElement>("input").disabled = false;
+      addMessage("Back.", "note");
+      input.focus();
+      break;
+    }
     case "ended":
       endWith(payload.reason);
       break;
