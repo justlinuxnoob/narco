@@ -13,12 +13,17 @@
 //!
 //! See PROTOCOL.md §11.
 
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: calling tor's C entry point on iOS needs `unsafe`, and
+// `forbid` cannot be lifted even locally. It stays denied everywhere except the
+// one module that talks to C.
+#![deny(unsafe_code)]
 
 pub mod daemon;
 pub mod onion;
-// iOS runs the same C tor in this process; see the module for why.
-#[cfg(target_os = "ios")]
+// iOS runs the same C tor in this process; see the module for why. The feature
+// exists only so this module can be type-checked off iOS — linking still needs
+// the framework, but a compile error should not cost a CI round trip.
+#[cfg(any(target_os = "ios", feature = "check-embedded"))]
 pub mod embedded;
 pub mod status;
 pub mod transport;

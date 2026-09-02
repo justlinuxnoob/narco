@@ -23,6 +23,12 @@ base64 = "0.23"
 sha2 = "0.11"
 tracing = "0.1"
 
+[features]
+# Type-check the iOS-only tor module on any platform. Never enabled by a real
+# build; it exists so `cargo check --features check-embedded` catches what only
+# an iOS compile would otherwise reveal.
+check-embedded = []
+
 [lints.rust]
 # Not "forbid": calling tor's C entry point on iOS needs unsafe, and
 # forbid cannot be lifted even locally. It is confined to `embedded`,

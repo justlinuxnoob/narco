@@ -33,6 +33,24 @@ See for yourself, without connecting to anything:
 cargo run -p narco-tor --example derive -- "YOUR-SECRET-HERE"
 ```
 
+## Get it
+
+Latest builds are on the [releases page](https://github.com/justlinuxnoob/narco/releases/latest).
+
+| Platform | File | How |
+| --- | --- | --- |
+| Windows | `_installer.exe` | Install and launch from the Start menu |
+| Windows, no install | `_portable.zip` | Unzip, run `Narco.exe` |
+| Linux | `_linux_portable.tar.gz` | Extract, run `./narco` |
+| Android | `_android.apk` | Sideload it |
+| iOS | — | TestFlight, not yet public |
+
+The portable builds keep the executable and the `tor` folder together; the app
+runs that Tor daemon itself. Windows will warn that the publisher is unknown,
+because the build is unsigned.
+
+Arch and derivatives can build a package from [`packaging/PKGBUILD`](packaging/PKGBUILD).
+
 ## What it does
 
 - **Two people, ever.** The moment the handshake confirms, the address is
@@ -51,13 +69,20 @@ cargo run -p narco-tor --example derive -- "YOUR-SECRET-HERE"
 
 Stated plainly, because a privacy claim that hides its limits is worthless.
 
-- **It is not instant.** A cold start takes about **90 seconds** — roughly 35 s
-  to join the Tor network, then under a minute for the two apps to find each
-  other. That is the price of needing no server. Measured, not estimated.
+- **It is not instant.** Joining the Tor network takes about **10 seconds**;
+  the two apps then need a minute or two to find each other. That second part
+  is the price of needing no server — an onion address has to be published and
+  propagate before anyone can dial it. Later connections are quicker, because
+  Tor keeps its network cache.
 - **It does not protect a compromised device.** Plaintext is on both screens.
-- **The onion descriptor exists in Tor's directory for a few hours.** It is
-  encrypted and cannot be enumerated, but "nothing exists anywhere" is not
-  literally true at the Tor layer.
+- **A guessable secret is a guessable address.** The onion address is derived
+  from the secret, so an attacker can guess secrets, derive addresses, and ask
+  the Tor directory which ones exist — offline, in bulk, without touching
+  either of you. Argon2id prices each guess in memory, but what decides this is
+  the secret: generated is 130 bits and unreachable, invented is nearer 30.
+  **Use the generated code.** Narco fills one in and warns if you replace it.
+- **The onion descriptor lives in Tor's directory for a few hours.** So
+  "nothing exists anywhere" is not literally true at the Tor layer.
 - **Reused secrets meet at the same address.** Old messages are unrecoverable
   either way, but someone who learns your secret could show up in a *new* empty
   room pretending to be your friend. Generate a fresh one each time.
@@ -80,13 +105,21 @@ secret connects to nothing and says nothing.
 No cryptographic primitive is implemented here. Every one comes from an
 established, reviewed crate.
 
+**Tor is the C `tor` daemon** — the same binary Tor Browser ships, currently
+0.4.9.11. Windows, Linux and Android run it as a child process. iOS cannot
+execute a second binary, so there the identical version is linked into the app
+and started on a thread instead. One implementation, four platforms.
+
+Known weaknesses are listed in [`SECURITY.md`](SECURITY.md) rather than left
+for a reader to find, including the ones not yet fixed.
+
 ## Layout
 
 | | |
 | --- | --- |
 | `crates/narco-proto` | All cryptography. Transport-agnostic, no Tor dependency. |
 | `crates/narco-tor` | Secret → onion address, and meeting without a server. |
-| `app/` | Tauri desktop app. Holds no keys; the UI is 4 kB of JavaScript. |
+| `app/` | Tauri app for all four platforms. Holds no keys; the UI is 4 kB of JavaScript. |
 
 There is no fourth entry. Narco once carried an optional self-hosted relay; it
 was removed in 0.5.5, because nothing could select it and shipping an unusable
@@ -113,8 +146,14 @@ cargo run -p narco-tor --example live_handshake   # takes a few minutes
 
 ## Status
 
-Early. The protocol and transport are implemented and tested, including live
-over Tor. It has **not** been audited. Don't stake your safety on it yet.
+Early, and working: Tor connects and two people can talk on Windows, Linux,
+Android and iOS.
+
+It has **not** been audited. An internal review in 0.5.6 found seven real
+defects — including a forward-secrecy claim that was false because a crate
+feature was off — and four more are documented but unfixed in
+[`SECURITY.md`](SECURITY.md). That is what a couple of careful readers found;
+it is not what a professional audit would find. Don't stake your safety on it.
 
 ## Licence
 
