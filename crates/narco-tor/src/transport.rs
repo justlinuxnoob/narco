@@ -92,14 +92,40 @@ impl TorTransport {
             }
         };
 
-        let daemon = TorDaemon::launch(dir, |percent, detail| {
+        let report = |percent, detail: &str| {
             on_status(Status::BootstrappingTor {
                 percent,
                 detail: detail.to_string(),
             });
-        })
-        .await
-        .map_err(|e: DaemonError| TorError::Engine(e.to_string()))?;
+        };
+
+        let daemon = match TorDaemon::launch(dir, report).await {
+            Ok(d) => d,
+            // tor takes an exclusive lock on its data directory, so a second
+            // copy of the app on the same machine cannot start against the same
+            // one — it is not a leftover process, it is the first copy still
+            // running. Two windows open at once is a normal thing to do, and
+            // testing with two is how anyone tries this out.
+            //
+            // The shared directory is still preferred, because it holds the
+            // network cache that makes later starts quick. Only when it is
+            // genuinely in use does this instance take one of its own.
+            Err(e) if is_directory_in_use(&e) => {
+                let mine = dir.with_file_name(format!(
+                    "{}-{}",
+                    dir.file_name().unwrap_or_default().to_string_lossy(),
+                    std::process::id()
+                ));
+                tracing::info!(
+                    "tor's data directory is in use by another copy; using {}",
+                    mine.display()
+                );
+                TorDaemon::launch(&mine, report)
+                    .await
+                    .map_err(|e: DaemonError| TorError::Engine(e.to_string()))?
+            }
+            Err(e) => return Err(TorError::Engine(e.to_string())),
+        };
 
         let socks_port = daemon.socks_port();
         Ok(Self {
@@ -290,6 +316,18 @@ async fn socks5_connect(
         }
     }
     Ok(s)
+}
+
+/// Whether a launch failed because another tor already holds the directory.
+///
+/// Matched on tor's own words rather than an error kind, because it arrives as
+/// the text tor printed on its way out. Narrow on purpose: every other startup
+/// failure should still surface rather than silently starting somewhere else.
+fn is_directory_in_use(e: &DaemonError) -> bool {
+    let text = e.to_string();
+    text.contains("another Tor process is running")
+        || text.contains("Could not lock")
+        || text.contains("still running and holding")
 }
 
 /// A data directory owned by this app, so it can be cleared safely and holds

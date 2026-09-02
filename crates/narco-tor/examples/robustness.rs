@@ -25,10 +25,7 @@ fn quiet(_s: Status) {}
 async fn pair_once(host_tor: &TorTransport, join_tor: &TorTransport, code: &str) -> Res<()> {
     let derived = narco_proto::derive_multi(&[code])?;
     let (dh, dj) = (derived.clone(), derived.clone());
-    let (mut hc, mut jc) = tokio::try_join!(
-        host_tor.host(&dh, quiet),
-        join_tor.join(&dj, quiet),
-    )?;
+    let (mut hc, mut jc) = tokio::try_join!(host_tor.host(&dh, quiet), join_tor.join(&dj, quiet),)?;
 
     send_frame(&mut hc.stream, &hc.session.encrypt(b"from host")?).await?;
     let f = recv_frame(&mut jc.stream).await?;
@@ -77,10 +74,7 @@ async fn main() -> Res<()> {
     println!("3. a peer vanishing mid-conversation");
     let derived = narco_proto::derive_multi(&[CODE])?;
     let (dh, dj) = (derived.clone(), derived.clone());
-    let (mut hc, jc) = tokio::try_join!(
-        host_tor.host(&dh, quiet),
-        join_tor.join(&dj, quiet),
-    )?;
+    let (mut hc, jc) = tokio::try_join!(host_tor.host(&dh, quiet), join_tor.join(&dj, quiet),)?;
     drop(jc); // no goodbye, just gone
     let saw_end = match recv_frame(&mut hc.stream).await {
         Err(_) => true,
@@ -94,6 +88,34 @@ async fn main() -> Res<()> {
     let t = Instant::now();
     pair_once(&host_tor, &join_tor, CODE).await?;
     println!("   ok in {:?}\n", t.elapsed());
+
+    // 5. Someone arrives with the wrong secret.
+    //
+    // The host must reject them without ending, and must still be there for the
+    // person who has the right one — otherwise anyone who learned the address
+    // could deny the room to its owner by connecting once. It should also be
+    // slower each time, which is the guessing limit doing its job.
+    println!("5. a wrong secret is rejected, and the right one still gets in");
+    let right = narco_proto::derive_multi(&[CODE])?;
+    let wrong = narco_proto::derive_multi(&["TOTALLYWRONGCODE9"])?;
+    let t = Instant::now();
+    let (rh, rj) = (right.clone(), right.clone());
+    let (host_side, _bad, good) = tokio::join!(
+        host_tor.host(&rh, quiet),
+        // Knocks first with the wrong secret.
+        join_tor.join(&wrong, quiet),
+        // And the real peer arrives while the host is still waiting.
+        async {
+            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+            join_tor.join(&rj, quiet).await
+        },
+    );
+    assert!(host_side.is_ok(), "the host gave up on a wrong secret");
+    assert!(good.is_ok(), "the right secret could not get in afterwards");
+    println!(
+        "   wrong secret refused, right one admitted, in {:?}\n",
+        t.elapsed()
+    );
 
     println!("ALL ROBUSTNESS SCENARIOS PASSED in {:?}", started.elapsed());
     Ok(())
