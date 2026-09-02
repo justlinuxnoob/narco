@@ -197,8 +197,16 @@ jobs:
           echo "--- building and archiving ---"
           (cd app && npm run tauri ios build -- --export-method app-store-connect) || true
 
-          archive="$(find app/src-tauri/gen/apple "$HOME/Library/Developer/Xcode/Archives" \
-                       -name '*.xcarchive' -print 2>/dev/null | head -1)"
+          # `|| true` on the find as well as the build. Under `set -euo
+          # pipefail` a failing command substitution ends the script, and find
+          # exits non-zero when any search root is missing — which the Archives
+          # directory is on a fresh runner. That killed the step one line after
+          # the build, making it look like the `|| true` above had not worked.
+          mkdir -p "$HOME/Library/Developer/Xcode/Archives"
+          archive="$(find app/src-tauri/gen/apple \
+                          "$HOME/Library/Developer/Xcode/Archives" \
+                          "$HOME/Library/Developer/Xcode/DerivedData" \
+                          -name '*.xcarchive' -print 2>/dev/null | head -1 || true)"
           if [ -z "$archive" ]; then
             echo "::error::no .xcarchive was produced — the build itself failed, not the export"
             exit 1
