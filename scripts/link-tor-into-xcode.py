@@ -19,8 +19,13 @@ import re
 import sys
 
 pbx, xcf = sys.argv[1], sys.argv[2]
+# One path, not two. Putting both slices on the search path made the linker
+# take whichever came first, and it does not skip an architecture that does not
+# match — it stops with "building for iOS-simulator, but linking in object file
+# built for iOS". $(PLATFORM_NAME) is iphoneos or iphonesimulator, so the
+# caller arranges the slices under those names and Xcode picks.
 add = {
-    "FRAMEWORK_SEARCH_PATHS": f'"{xcf}/ios-arm64", "{xcf}/ios-arm64_x86_64-simulator"',
+    "FRAMEWORK_SEARCH_PATHS": f'"{xcf}/$(PLATFORM_NAME)"',
     "OTHER_LDFLAGS": '"-framework", "tor"',
 }
 
@@ -29,6 +34,12 @@ blocks = s.count("buildSettings = {")
 
 
 def merge(setting: str, additions: str, body: str) -> str:
+    # Already applied. Checked on the value, not the key: running twice
+    # otherwise appends the same path again, which is harmless to the build but
+    # makes "idempotent" untrue and the test that asserts it meaningless.
+    if additions in body:
+        return body
+
     # A list, possibly spanning lines.
     lst = re.compile(rf"^([ \t]*){setting} = \((.*?)\);", re.M | re.S)
     m = lst.search(body)
@@ -65,7 +76,7 @@ assert len(configs) == blocks, f"{len(configs)} blocks after, {blocks} before"
 for i, b in enumerate(configs, 1):
     # Checked per block rather than per line: Xcode writes lists across several
     # lines, so the setting name and the value it gained are not on one line.
-    assert "ios-arm64" in b, f"block {i}: tor search path missing"
+    assert "$(PLATFORM_NAME)" in b, f"block {i}: tor search path missing"
     assert '"-framework", "tor"' in b, f"block {i}: tor ldflag missing"
     for setting in add:
         n = len(re.findall(rf"^[ \t]*{setting} = ", b, re.M))
