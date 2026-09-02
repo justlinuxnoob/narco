@@ -146,39 +146,44 @@ jobs:
             *) echo "::error::APP_STORE_CONNECT_ISSUER_ID is not a UUID. It is the 'Issuer ID' at the top of the Integrations page — not the Key ID, and not the Team ID." ; exit 1 ;;
           esac
 
-          # The web assets are normally built by the Tauri CLI; xcodebuild only
-          # knows how to build the Rust half.
-          (cd app && npm run build)
-
-          gen=app/src-tauri/gen/apple
-          auth=(-allowProvisioningUpdates
-                -authenticationKeyPath "$key"
-                -authenticationKeyID "$ASC_KEY_ID"
-                -authenticationKeyIssuerID "$ASC_ISSUER_ID")
-
+          # Two tools, one each of the two things needed, and neither can do
+          # the other's job.
+          #
+          # Only xcodebuild can turn an API key into a signing certificate and a
+          # provisioning profile — the Tauri CLI has no flags for it, which is
+          # why Xcode previously reported "No Accounts".
+          #
+          # Only the Tauri CLI can build. Its Xcode project runs the Rust
+          # compile in a script phase that calls back to the CLI over a local
+          # socket for its options, so driving xcodebuild directly dies with
+          # "failed to read CLI options: ConnectionRefused" — there is no CLI
+          # listening.
+          #
+          # So: run xcodebuild once purely to make Xcode create the credentials.
+          # It will fail at that Rust phase, which is expected and ignored;
+          # provisioning happens before it, so the certificate and profile are
+          # on the machine afterwards. Then let the Tauri CLI build normally and
+          # find them.
+          echo "--- priming signing assets ---"
           xcodebuild "${auth[@]}" \
-            -workspace "$gen/narco-app.xcodeproj/project.xcworkspace" \
+            -workspace "app/src-tauri/gen/apple/narco-app.xcodeproj/project.xcworkspace" \
             -scheme narco-app_iOS -sdk iphoneos -configuration release \
-            -archivePath "$PWD/build/Narco.xcarchive" \
             DEVELOPMENT_TEAM="$APPLE_DEVELOPMENT_TEAM" \
-            archive
+            build 2>&1 | grep -iE "ProcessProductPackaging|error:" | head -5 || true
 
-          cat > build/ExportOptions.plist <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>method</key><string>app-store-connect</string>
-            <key>teamID</key><string>${APPLE_DEVELOPMENT_TEAM}</string>
-            <key>uploadSymbols</key><true/>
-          </dict></plist>
-          PLIST
+          profiles="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+          count=$(ls "$profiles" 2>/dev/null | wc -l | tr -d ' ')
+          echo "provisioning profiles on the machine: $count"
+          security find-identity -v -p codesigning | tail -2
+          if [ "$count" = "0" ]; then
+            echo "::error::Xcode did not produce a provisioning profile for app.narco.chat"
+            exit 1
+          fi
 
-          xcodebuild "${auth[@]}" -exportArchive \
-            -archivePath "$PWD/build/Narco.xcarchive" \
-            -exportPath "$PWD/build/ipa" \
-            -exportOptionsPlist build/ExportOptions.plist
+          echo "--- building and exporting ---"
+          (cd app && npm run tauri ios build -- --export-method app-store-connect)
 
-          ipa="$(find build/ipa -name '*.ipa' | head -1)"
+          ipa="$(find app/src-tauri/gen/apple/build -name '*.ipa' | head -1)"
           test -n "$ipa" || { echo "::error::no .ipa was produced"; exit 1; }
           echo "uploading $ipa"
           xcrun altool --upload-app -f "$ipa" -t ios \
@@ -191,5 +196,5 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
           path: |
-            build/ipa/*.ipa
+            app/src-tauri/gen/apple/build/**/*.ipa
             app/src-tauri/gen/apple/build/**/*.app
