@@ -57,6 +57,10 @@ Arch and derivatives can build a package from [`packaging/PKGBUILD`](packaging/P
   unpublished. There is no longer a door for a third person to knock on.
 - **Any number of secrets.** Use one, or five. Send each a different way — one
   messaged, one spoken aloud — so intercepting one channel yields nothing.
+- **Photos and files.** Sent as ordinary encrypted messages, cut into pieces
+  because one message holds 32 KiB. A photo appears in the conversation;
+  anything else is offered as a download. Received files stay in memory and
+  reach your disk only if you save them.
 - **Nothing on disk.** No database, no history, no logs. Messages live in memory
   and die with the session.
 - **Forward secrecy.** Each message's key is destroyed right after use. Someone

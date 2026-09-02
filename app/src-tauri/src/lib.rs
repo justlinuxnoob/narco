@@ -5,7 +5,14 @@
 //! webview. Plaintext exists in exactly two places — the running session task
 //! and the on-screen message list — and both are destroyed together.
 
+mod wire_format;
+
+use base64::Engine as _;
 use narco_proto::{Error as ProtoError, Event};
+
+/// Files cross to the webview as text; an event payload cannot carry bytes.
+const B64: base64::engine::general_purpose::GeneralPurpose =
+    base64::engine::general_purpose::STANDARD;
 use narco_tor::wire::{recv_frame, send_frame, Connected};
 use narco_tor::{Status, TorTransport};
 use serde::Serialize;
@@ -14,44 +21,12 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 
-/// A message on the wire: the sender's chosen name, a NUL, then the text.
-///
-/// Always, not only when a third person is present. A single format means
-/// there is no mode to switch and no moment where the two ends disagree about
-/// how to read a message — and when the host relays between two other people,
-/// the name travels with the message so nothing has to be re-attributed.
-///
-/// The name is what the sender claims, not anything the protocol vouches for.
-/// Everyone in the room already holds the secret, so it distinguishes people
-/// who are meant to be there rather than authenticating them.
-fn encode_message(nickname: &str, text: &str) -> Vec<u8> {
-    // A NUL cannot appear in the name: the UI rejects it, and it is stripped
-    // here too so a crafted name cannot fake a second field.
-    let name = nickname.replace('\0', "");
-    let mut out = Vec::with_capacity(name.len() + 1 + text.len());
-    out.extend_from_slice(name.as_bytes());
-    out.push(0);
-    out.extend_from_slice(text.as_bytes());
-    out
-}
-
-/// Split a received message back into sender and text.
-///
-/// A message with no NUL is treated as coming from someone unnamed rather than
-/// rejected, so a peer running an older build still gets read.
-fn decode_message(raw: &[u8]) -> Option<(String, String)> {
-    match raw.iter().position(|b| *b == 0) {
-        Some(i) => Some((
-            String::from_utf8(raw[..i].to_vec()).ok()?,
-            String::from_utf8(raw[i + 1..].to_vec()).ok()?,
-        )),
-        None => Some((String::new(), String::from_utf8(raw.to_vec()).ok()?)),
-    }
-}
-
 /// Commands from the UI to the running session task.
 enum Cmd {
     Send(String),
+    /// A file to cut up and send. Held in memory only: it came from the user's
+    /// own disk and never goes back to ours.
+    SendFile { name: String, data: Vec<u8> },
     End,
 }
 
@@ -67,6 +42,20 @@ enum UiEvent {
     /// A decrypted message from the peer. `from` is the name they chose, and
     /// is empty when they did not choose one.
     Message { from: String, text: String },
+    /// A file arrived whole. `data` is base64 because an event payload cannot
+    /// carry raw bytes; it is held in memory and written nowhere.
+    File {
+        from: String,
+        name: String,
+        data: String,
+    },
+    /// How far along a transfer is, in either direction.
+    FileProgress {
+        name: String,
+        sent: u32,
+        total: u32,
+        outgoing: bool,
+    },
     /// Session over. `reason` is shown to the user.
     Ended { reason: String },
     /// The connection dropped and is being re-established. The conversation is
@@ -182,6 +171,12 @@ fn emit(app: &AppHandle, e: UiEvent) {
             "[narco] tor: {text} (ready={ready} failed={failed})"
         )),
         UiEvent::Message { .. } => None, // never log message events
+        UiEvent::File { .. } => None,    // nor file contents
+        // Only that a transfer is happening, never the name or the bytes.
+        UiEvent::FileProgress { sent, total, outgoing, .. } => Some(format!(
+            "[narco] file {} {sent}/{total}",
+            if *outgoing { "sending" } else { "receiving" }
+        )),
     };
     if let Some(line) = line {
         eprintln!("{line}");
@@ -491,6 +486,12 @@ async fn run_session(
     // after the conversation resumes.
     let mut idle_warned = false;
 
+    // Pieces of files still arriving, keyed by transfer. Memory only, and gone
+    // with the session like everything else.
+    let mut incoming_files: std::collections::HashMap<u64, (String, Vec<Vec<u8>>)> =
+        std::collections::HashMap::new();
+    let mut next_transfer_id: u64 = 0;
+
     let reason = 'session: loop {
         tokio::select! {
             // Peer traffic.
@@ -503,15 +504,44 @@ async fn run_session(
                     emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
                 }
                 match session.handle(&frame) {
-                    Ok(Event::Message(m)) => match String::from_utf8(m) {
-                        Ok(raw) => match decode_message(raw.as_bytes()) {
-                            Some((from, text)) => emit(app, UiEvent::Message { from, text }),
-                            None => break 'session (
-                                "Received a malformed message.".to_string(),
-                                false,
-                            ),
-                        },
-                        Err(_) => break 'session ("Received a malformed message.".to_string(), false),
+                    Ok(Event::Message(m)) => match wire_format::decode(&m) {
+                        Some(wire_format::Incoming::Text { from, text }) => {
+                            emit(app, UiEvent::Message { from, text })
+                        }
+                        Some(wire_format::Incoming::File {
+                            from, id, index, total, name, data,
+                        }) => {
+                            // Pieces are held until the set is complete. A
+                            // transfer that is abandoned halfway is dropped
+                            // when the session ends, along with everything
+                            // else.
+                            let entry = incoming_files
+                                .entry(id)
+                                .or_insert_with(|| (name.clone(), vec![Vec::new(); total as usize]));
+                            if entry.1.len() == total as usize {
+                                entry.1[index as usize] = data;
+                                let have = entry.1.iter().filter(|c| !c.is_empty()).count() as u32;
+                                emit(app, UiEvent::FileProgress {
+                                    name: name.clone(),
+                                    sent: have,
+                                    total,
+                                    outgoing: false,
+                                });
+                                if have == total {
+                                    let (name, parts) = incoming_files.remove(&id).expect("just seen");
+                                    let bytes: Vec<u8> = parts.concat();
+                                    emit(app, UiEvent::File {
+                                        from,
+                                        name,
+                                        data: B64.encode(&bytes),
+                                    });
+                                }
+                            }
+                        }
+                        None => break 'session (
+                            "Received a malformed message.".to_string(),
+                            false,
+                        ),
                     },
                     Ok(_) => break 'session ("Unexpected handshake frame.".to_string(), false),
                     // Any protocol error is terminal by design.
@@ -534,7 +564,7 @@ async fn run_session(
                             idle_warned = false;
                             emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
                         }
-                        match session.encrypt(&encode_message(&nickname, &text)) {
+                        match session.encrypt(&wire_format::encode_text(&nickname, &text)) {
                             Ok(frame) => {
                                 if send_frame(&mut writer, &frame).await.is_err() {
                                     break 'session ("The other person disconnected.".to_string(), true);
@@ -550,6 +580,42 @@ async fn run_session(
                                 );
                             }
                             Err(e) => break 'session (e.to_string(), false),
+                        }
+                    }
+                    Some(Cmd::SendFile { name, data }) => {
+                        // Each piece is an ordinary encrypted message, so a
+                        // file gets exactly the protection everything else in
+                        // the room gets, and the transport never learns it is
+                        // carrying a file.
+                        let total = data.len().div_ceil(wire_format::CHUNK).max(1) as u32;
+                        let id = next_transfer_id;
+                        next_transfer_id = next_transfer_id.wrapping_add(1);
+                        let mut failed = false;
+                        for (i, part) in data.chunks(wire_format::CHUNK).enumerate() {
+                            let msg = wire_format::encode_file_chunk(
+                                &nickname, id, i as u32, total, &name, part,
+                            );
+                            match session.encrypt(&msg) {
+                                Ok(frame) => {
+                                    if send_frame(&mut writer, &frame).await.is_err() {
+                                        failed = true;
+                                        break;
+                                    }
+                                }
+                                Err(_) => {
+                                    failed = true;
+                                    break;
+                                }
+                            }
+                            emit(app, UiEvent::FileProgress {
+                                name: name.clone(),
+                                sent: i as u32 + 1,
+                                total,
+                                outgoing: true,
+                            });
+                        }
+                        if failed {
+                            break 'session ("The other person disconnected.".to_string(), true);
                         }
                     }
                     Some(Cmd::End) => break 'session ("You ended the session.".to_string(), false),
@@ -605,6 +671,20 @@ fn send(state: State<'_, AppState>, text: String) -> Result<(), String> {
     let guard = state.tx.lock().expect("state poisoned");
     let tx = guard.as_ref().ok_or("no session")?;
     tx.try_send(Cmd::Send(text))
+        .map_err(|_| "session busy".to_string())
+}
+
+/// Send a file the user picked. `data` is base64, because that is what the
+/// webview can hand across the IPC boundary.
+#[tauri::command]
+fn send_file(state: State<'_, AppState>, name: String, data: String) -> Result<(), String> {
+    let bytes = B64.decode(&data).map_err(|_| "could not read that file")?;
+    if bytes.is_empty() {
+        return Err("that file is empty".into());
+    }
+    let guard = state.tx.lock().expect("state poisoned");
+    let tx = guard.as_ref().ok_or("no session")?;
+    tx.try_send(Cmd::SendFile { name, data: bytes })
         .map_err(|_| "session busy".to_string())
 }
 
@@ -707,6 +787,7 @@ pub fn run() {
             warm_tor,
             connect,
             send,
+            send_file,
             end_session
         ])
         .run(tauri::generate_context!())

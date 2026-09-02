@@ -18,6 +18,8 @@ type UiEvent =
   | { kind: "idleWarning"; secondsLeft: number; active: boolean }
   | { kind: "reconnecting" }
   | { kind: "reconnected" }
+  | { kind: "file"; from: string; name: string; data: string }
+  | { kind: "fileProgress"; name: string; sent: number; total: number; outgoing: boolean }
   | { kind: "torProgress"; text: string; ready: boolean; failed: boolean };
 
 const $ = <T extends HTMLElement>(id: string) => {
@@ -360,6 +362,61 @@ $<HTMLFormElement>("composer").addEventListener("submit", async (e) => {
   }
 });
 
+// --- files ----------------------------------------------------------------
+
+const fileInput = $<HTMLInputElement>("file");
+$("attach").addEventListener("click", () => fileInput.click());
+
+fileInput.addEventListener("change", async () => {
+  const file = fileInput.files?.[0];
+  fileInput.value = ""; // so picking the same file twice still fires
+  if (!file) return;
+  // Read here rather than in Rust: the webview's own picker means the app
+  // never needs permission to read the disk generally, only the one file the
+  // user chose.
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  try {
+    await invoke("send_file", { name: file.name, data: btoa(binary) });
+  } catch (e) {
+    addMessage(String(e), "note");
+  }
+});
+
+/** An image is shown; anything else is offered as a download. */
+function addFile(name: string, dataB64: string, who: "me" | "them", from = "") {
+  const li = document.createElement("li");
+  li.className = who;
+  if (from) {
+    const tag = document.createElement("span");
+    tag.className = "who";
+    tag.textContent = from;
+    li.append(tag);
+  }
+  const looksLikeImage = /\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(name);
+  // A data URL, so the bytes stay in this page and are written to disk only
+  // if the user saves them somewhere themselves.
+  const href = `data:application/octet-stream;base64,${dataB64}`;
+  if (looksLikeImage) {
+    const img = document.createElement("img");
+    img.className = "photo";
+    img.alt = name;
+    img.src = `data:image/*;base64,${dataB64}`;
+    li.append(img);
+  }
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = name;
+  a.className = "file";
+  a.textContent = looksLikeImage ? `save ${name}` : name;
+  li.append(a);
+  messages.append(li);
+  messages.scrollTop = messages.scrollHeight;
+}
+
 $("end").addEventListener("click", () => invoke("end_session"));
 
 // --- ended ----------------------------------------------------------------
@@ -482,6 +539,19 @@ listen<UiEvent>("narco", ({ payload }) => {
       input.focus();
       break;
     }
+    case "fileProgress": {
+      const el = $("transfer");
+      const done = payload.sent >= payload.total;
+      el.hidden = done;
+      el.textContent = done
+        ? ""
+        : `${payload.outgoing ? "sending" : "receiving"} ${payload.name} — ${payload.sent}/${payload.total}`;
+      break;
+    }
+    case "file":
+      $("transfer").hidden = true;
+      addFile(payload.name, payload.data, "them", payload.from);
+      break;
     case "ended":
       endWith(payload.reason);
       break;

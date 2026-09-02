@@ -1,6 +1,6 @@
 [package]
 name = "narco-app"
-version = "0.8.3"
+version = "0.9.0"
 edition = "2021"
 rust-version = "1.82"
 license = "AGPL-3.0-or-later"
@@ -21,6 +21,9 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 futures = "0.3"
+# Files cross the IPC boundary to the webview as text; the webview cannot hold
+# raw bytes in an event payload.
+base64 = "0.23"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

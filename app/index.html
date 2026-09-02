@@ -128,7 +128,12 @@
       </header>
       <p class="warn" id="idle-warning" role="alert" hidden></p>
       <ol id="messages" aria-live="polite"></ol>
+      <p class="hint" id="transfer" hidden></p>
       <form id="composer">
+        <!-- The picker is the webview's own, so choosing a file needs no
+             permission to read the disk generally. -->
+        <input id="file" type="file" hidden />
+        <button id="attach" class="ghost" type="button" title="send a file">+</button>
         <input
           id="input"
           type="text"

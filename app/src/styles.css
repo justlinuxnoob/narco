@@ -336,6 +336,28 @@ button.small {
   }
 }
 
+/* A received photo, shown inline. Capped so a large one cannot push the
+   conversation off the screen. */
+.photo {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+}
+
+a.file {
+  display: inline-block;
+  font-size: 12px;
+  color: inherit;
+}
+
+#attach {
+  padding: 11px 14px;
+  font-weight: 700;
+}
+
 /* --- per-secret actions -------------------------------------------------- */
 
 button.icon {
