@@ -223,7 +223,7 @@ async fn socks5_connect(
     let mut greet = [0u8; 2];
     s.read_exact(&mut greet).await?;
     if greet != [0x05, 0x00] {
-        return Err(Error::new(ErrorKind::Other, "SOCKS5 greeting refused"));
+        return Err(Error::other("SOCKS5 greeting refused"));
     }
 
     // CONNECT to a domain name.

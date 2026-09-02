@@ -19,6 +19,15 @@ jobs:
   ipa:
     name: ipa
     runs-on: macos-15
+    # Hoisted to the job so the upload step can test it. `secrets` is not one of
+    # the contexts available to a step's `if`, and using it there does not fail
+    # the step — it makes the whole workflow unparseable, which is why the run
+    # showed up under a file path instead of a name.
+    env:
+      ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+      APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
     steps:
       - uses: actions/checkout@v4
 
@@ -101,13 +110,8 @@ jobs:
       # in scope for its own `if`, so testing env there is always false and the
       # upload would never run even once the secrets existed.
       - name: Sign and upload to TestFlight
-        if: ${{ secrets.APP_STORE_CONNECT_KEY_ID != '' }}
+        if: ${{ env.ASC_KEY_ID != '' }}
         working-directory: app
-        env:
-          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          ASC_KEY_P8: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
-          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
         run: |
           set -euo pipefail
           # $HOME, not ~: a tilde inside quotes is not expanded, and this would
