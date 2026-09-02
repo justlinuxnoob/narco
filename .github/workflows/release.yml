@@ -93,14 +93,18 @@ jobs:
           # Resolve the current version rather than pinning one. dist.torproject
           # .org keeps only recent releases, so a hardcoded version 404s as soon
           # as Tor ships an update — which happened mid-development.
-          TOR_VERSION="$(curl -fsSL --retry 3 \
+          TOR_VERSION="$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 \
             https://aus1.torproject.org/torbrowser/update_3/release/downloads.json \
             | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).version))")"
           echo "tor version: $TOR_VERSION"
+          case "$TOR_VERSION" in
+            [0-9]*.[0-9]*) : ;;
+            *) echo "::error::could not resolve the tor version (got '$TOR_VERSION') — the update feed fetch failed" ; exit 1 ;;
+          esac
 
           URL="https://dist.torproject.org/torbrowser/${TOR_VERSION}/tor-expert-bundle-${PLATFORM}-${TOR_VERSION}.tar.gz"
           echo "downloading $URL"
-          curl -fsSL --retry 3 -o teb.tar.gz "$URL"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o teb.tar.gz "$URL"
           mkdir -p app/src-tauri/tor
           # The daemon and its libraries, and nothing else. Skipped:
           #   pluggable_transports — only for censored networks, ~30 MB

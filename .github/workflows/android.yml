@@ -121,10 +121,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TOR_VERSION="$(curl -fsSL --retry 3 \
+          TOR_VERSION="$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 \
             https://aus1.torproject.org/torbrowser/update_3/release/downloads.json \
             | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).version))")"
           echo "tor version: $TOR_VERSION"
+          case "$TOR_VERSION" in
+            [0-9]*.[0-9]*) : ;;
+            *) echo "::error::could not resolve the tor version (got '$TOR_VERSION') — the update feed fetch failed" ; exit 1 ;;
+          esac
 
           JNI=app/src-tauri/gen/android/app/src/main/jniLibs
           # Tor's architecture names on the left, Android's on the right.
@@ -132,7 +136,7 @@ jobs:
             TOR_ARCH="${pair%%:*}"; ABI="${pair##*:}"
             url="https://dist.torproject.org/torbrowser/${TOR_VERSION}/tor-expert-bundle-android-${TOR_ARCH}-${TOR_VERSION}.tar.gz"
             echo "fetching $ABI from $url"
-            curl -fsSL --retry 3 -o "teb-${ABI}.tar.gz" "$url"
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "teb-${ABI}.tar.gz" "$url"
             mkdir -p "$JNI/$ABI"
             tar xzf "teb-${ABI}.tar.gz" -C "$JNI/$ABI" --strip-components=1 tor/libTor.so
             test -f "$JNI/$ABI/libTor.so"
