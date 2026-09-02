@@ -20,6 +20,7 @@
 
 use crate::daemon::{DaemonError, TorDaemon};
 use crate::onion::onion_key;
+use crate::status::{Status, TorError};
 use crate::wire::{run_handshake, ConnectError, Connected};
 use narco_proto::kdf::Derived;
 use narco_proto::Error as ProtoError;
@@ -49,43 +50,6 @@ const DIAL_RETRY: Duration = Duration::from_secs(4);
 /// doing it on purpose — hung the session with no idle timer yet armed and no
 /// `DEL_ONION` ever reached. Generous, because it runs over Tor.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(90);
-
-/// Coarse progress, for a UI that must explain a slow connect.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Status {
-    /// Joining the Tor network. `detail` is tor's own phase description, e.g.
-    /// "Loading relay descriptors", so a stall names the stage it stalled at.
-    BootstrappingTor { percent: u8, detail: String },
-    /// Connected to Tor; publishing our address.
-    PublishingService,
-    /// Published (or dialling); waiting for the other person.
-    WaitingForPeer,
-    /// A peer connection exists. The handshake runs next.
-    PeerFound,
-}
-
-#[derive(Debug)]
-pub enum TorError {
-    Daemon(DaemonError),
-    Launch(String),
-}
-
-impl std::fmt::Display for TorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TorError::Daemon(e) => write!(f, "{e}"),
-            TorError::Launch(e) => write!(f, "could not publish onion service: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for TorError {}
-
-impl From<DaemonError> for TorError {
-    fn from(e: DaemonError) -> Self {
-        TorError::Daemon(e)
-    }
-}
 
 /// A bootstrapped Tor daemon, reused for every chat in the session.
 pub struct TorTransport {
@@ -122,7 +86,8 @@ impl TorTransport {
                 detail: detail.to_string(),
             });
         })
-        .await?;
+        .await
+        .map_err(|e: DaemonError| TorError::Engine(e.to_string()))?;
 
         let socks_port = daemon.socks_port();
         Ok(Self {

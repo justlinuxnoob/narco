@@ -15,12 +15,29 @@
 
 #![forbid(unsafe_code)]
 
+// The daemon engine, and the identity/transport that drive it. iOS cannot
+// execute a second binary, so none of this is compiled there.
+#[cfg(not(target_os = "ios"))]
 pub mod daemon;
 pub mod onion;
+pub mod status;
+#[cfg(not(target_os = "ios"))]
 pub mod transport;
+
+// The iOS engine: Arti in this process.
+#[cfg(target_os = "ios")]
+pub mod arti_transport;
+#[cfg(target_os = "ios")]
+pub mod identity;
 pub mod wire;
 
+#[cfg(not(target_os = "ios"))]
 pub use daemon::{DaemonError, TorDaemon};
 pub use onion::{onion_key, OnionKey};
-pub use transport::{Status, TorError, TorTransport};
+pub use status::{Status, TorError};
+#[cfg(not(target_os = "ios"))]
+pub use transport::TorTransport;
+// Same name, same three methods, same statuses — the app never learns which.
+#[cfg(target_os = "ios")]
+pub use arti_transport::TorTransport;
 pub use wire::{run_handshake, ConnectError, Connected};

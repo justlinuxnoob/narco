@@ -1,0 +1,101 @@
+name: ios
+
+# Separate from the desktop release for the same reason Android is: iOS is the
+# least proven target here and must never hold back a build people are waiting
+# on. It also needs a macOS runner, which is slower and more contended.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ipa:
+    name: ipa
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Device and simulator. The simulator target is what makes a build
+          # possible at all without a signing identity.
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          V="${{ github.ref_name }}"; V="${V#v}"
+          node -e "
+            const f='app/src-tauri/tauri.conf.json';
+            const j=JSON.parse(require('fs').readFileSync(f,'utf8'));
+            j.version='$V';
+            require('fs').writeFileSync(f, JSON.stringify(j,null,2)+'\n');
+          "
+          sed -i '' -E "1,/^version = / s/^version = .*/version = \"$V\"/" \
+            app/src-tauri/Cargo.toml
+
+      - name: Install frontend
+        working-directory: app
+        run: npm ci
+
+      # Answers the question that actually matters first: does Arti compile for
+      # a real iPhone at all? It pulls in a large dependency tree and a C SQLite
+      # build, and if this fails nothing downstream is worth attempting.
+      - name: Does the Tor engine build for iOS?
+        run: cargo build --manifest-path crates/narco-tor/Cargo.toml --target aarch64-apple-ios
+
+      - name: Initialise the iOS project
+        working-directory: app
+        run: npm run tauri ios init
+
+      # Unsigned, for the simulator. This proves the whole app links — Rust,
+      # Arti and the Tauri iOS shell — without needing a signing identity, so it
+      # runs on every push whether or not the secrets below exist.
+      - name: Build for the simulator
+        working-directory: app
+        run: npm run tauri ios build -- --target aarch64-sim
+
+      # Everything past here needs an App Store Connect API key. Without the
+      # secrets the job still succeeds, having proved the build.
+      - name: Sign and upload to TestFlight
+        if: ${{ env.ASC_KEY_ID != '' }}
+        working-directory: app
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$ASC_KEY_P8" > "~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          npm run tauri ios build -- --export-method app-store-connect
+          xcrun altool --upload-app -f "$(find src-tauri/gen/apple/build -name '*.ipa' | head -1)" \
+            -t ios --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: narco-ios
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            app/src-tauri/gen/apple/build/**/*.ipa
+            app/src-tauri/gen/apple/build/**/*.app
