@@ -62,8 +62,15 @@ Arch and derivatives can build a package from [`packaging/PKGBUILD`](packaging/P
 - **Forward secrecy.** Each message's key is destroyed right after use. Someone
   who takes your device tomorrow cannot read what you said today, even with a
   full recording of the traffic.
-- **Ends three ways.** You hit end, ten minutes of silence pass, or the app
-  closes. All three wipe everything.
+- **Survives a dropped connection.** Switch apps on a phone and the OS closes
+  the socket; Narco publishes and dials the same address again and carries on,
+  with the conversation still on screen. A fresh handshake runs each time, so
+  it is a new session at the same address rather than a resumed one.
+- **Ends when you say so.** Pressing end or closing the app wipes everything.
+  A silence timeout is available but off by default, and when it is on it warns
+  a minute ahead rather than closing the chat without notice.
+- **Guessing is bounded.** A host answers five wrong secrets, each more slowly
+  than the last, and then stops.
 
 ## What it does not do
 
