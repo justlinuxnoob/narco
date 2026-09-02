@@ -280,6 +280,16 @@ button.small {
   overflow-wrap: anywhere;
 }
 
+/* The sender's chosen name, above their words. Only present when they set one,
+   so a two-person chat looks exactly as it did. */
+.who {
+  display: block;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  opacity: 0.62;
+  margin-bottom: 3px;
+}
+
 /* Sender is shown by alignment and fill, so it survives greyscale. */
 #messages li.me {
   align-self: flex-end;

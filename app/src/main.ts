@@ -13,7 +13,7 @@ import { listen } from "@tauri-apps/api/event";
 type UiEvent =
   | { kind: "status"; text: string; stage: string }
   | { kind: "ready" }
-  | { kind: "message"; text: string }
+  | { kind: "message"; from: string; text: string }
   | { kind: "ended"; reason: string }
   | { kind: "idleWarning"; secondsLeft: number; active: boolean }
   | { kind: "reconnecting" }
@@ -310,7 +310,8 @@ async function start(host: boolean) {
 
   const idleSecs = Number($<HTMLSelectElement>("idle").value);
   try {
-    await invoke("connect", { secrets, idleSecs, host });
+    const nickname = $<HTMLInputElement>("nickname").value.trim().replace(/\0/g, "");
+    await invoke("connect", { secrets, idleSecs, host, nickname });
   } catch (e) {
     endWith(String(e));
   }
@@ -362,12 +363,22 @@ let idleCountdown: number | undefined;
 
 const burnSeconds = () => Number($<HTMLSelectElement>("burn").value);
 
-function addMessage(text: string, who: "me" | "them" | "note") {
+function addMessage(text: string, who: "me" | "them" | "note", from = "") {
   const li = document.createElement("li");
   li.className = who;
-  // textContent, never innerHTML: a peer-supplied string must never be parsed
-  // as markup.
-  li.textContent = text;
+  // A name the sender chose, shown so a three-person room reads correctly. It
+  // is not authenticated — everyone present already holds the secret — so it
+  // distinguishes people rather than proving who they are.
+  if (from) {
+    const tag = document.createElement("span");
+    tag.className = "who";
+    // textContent, never innerHTML: this came from the peer.
+    tag.textContent = from;
+    li.append(tag);
+  }
+  const body = document.createElement("span");
+  body.textContent = text;
+  li.append(body);
   messages.append(li);
   messages.scrollTop = messages.scrollHeight;
 
@@ -481,7 +492,7 @@ listen<UiEvent>("narco", ({ payload }) => {
       break;
     }
     case "message":
-      addMessage(payload.text, "them");
+      addMessage(payload.text, "them", payload.from);
       break;
     case "idleWarning": {
       // Counts down rather than showing a fixed number, so it is obviously

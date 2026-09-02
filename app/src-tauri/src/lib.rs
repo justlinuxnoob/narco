@@ -14,6 +14,41 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 
+/// A message on the wire: the sender's chosen name, a NUL, then the text.
+///
+/// Always, not only when a third person is present. A single format means
+/// there is no mode to switch and no moment where the two ends disagree about
+/// how to read a message — and when the host relays between two other people,
+/// the name travels with the message so nothing has to be re-attributed.
+///
+/// The name is what the sender claims, not anything the protocol vouches for.
+/// Everyone in the room already holds the secret, so it distinguishes people
+/// who are meant to be there rather than authenticating them.
+fn encode_message(nickname: &str, text: &str) -> Vec<u8> {
+    // A NUL cannot appear in the name: the UI rejects it, and it is stripped
+    // here too so a crafted name cannot fake a second field.
+    let name = nickname.replace('\0', "");
+    let mut out = Vec::with_capacity(name.len() + 1 + text.len());
+    out.extend_from_slice(name.as_bytes());
+    out.push(0);
+    out.extend_from_slice(text.as_bytes());
+    out
+}
+
+/// Split a received message back into sender and text.
+///
+/// A message with no NUL is treated as coming from someone unnamed rather than
+/// rejected, so a peer running an older build still gets read.
+fn decode_message(raw: &[u8]) -> Option<(String, String)> {
+    match raw.iter().position(|b| *b == 0) {
+        Some(i) => Some((
+            String::from_utf8(raw[..i].to_vec()).ok()?,
+            String::from_utf8(raw[i + 1..].to_vec()).ok()?,
+        )),
+        None => Some((String::new(), String::from_utf8(raw.to_vec()).ok()?)),
+    }
+}
+
 /// Commands from the UI to the running session task.
 enum Cmd {
     Send(String),
@@ -29,8 +64,9 @@ enum UiEvent {
     Status { text: String, stage: String },
     /// Handshake confirmed; the chat is live.
     Ready,
-    /// A decrypted message from the peer.
-    Message { text: String },
+    /// A decrypted message from the peer. `from` is the name they chose, and
+    /// is empty when they did not choose one.
+    Message { from: String, text: String },
     /// Session over. `reason` is shown to the user.
     Ended { reason: String },
     /// The connection dropped and is being re-established. The conversation is
@@ -271,6 +307,7 @@ async fn connect(
     secrets: Vec<String>,
     idle_secs: u64,
     host: bool,
+    nickname: String,
 ) -> Result<(), String> {
     // Validate before doing anything slow.
     let derived = narco_proto::derive_multi(&secrets).map_err(|e| e.to_string())?;
@@ -292,7 +329,7 @@ async fn connect(
         // Catch panics so a bug can never leave the UI waiting forever with no
         // explanation. Every path out of here emits an Ended event.
         let reason = match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-            run_session(&app, derived, rx, idle_secs, tor, host),
+            run_session(&app, derived, rx, idle_secs, tor, host, nickname),
         ))
         .await
         {
@@ -339,6 +376,7 @@ async fn run_session(
     idle_secs: u64,
     tor: Arc<tokio::sync::OnceCell<Arc<TorTransport>>>,
     host: bool,
+    nickname: String,
 ) -> String {
     // 0 means the user chose "never". Represent it as an effectively unreachable
     // deadline rather than branching the select! arm.
@@ -466,7 +504,13 @@ async fn run_session(
                 }
                 match session.handle(&frame) {
                     Ok(Event::Message(m)) => match String::from_utf8(m) {
-                        Ok(text) => emit(app, UiEvent::Message { text }),
+                        Ok(raw) => match decode_message(raw.as_bytes()) {
+                            Some((from, text)) => emit(app, UiEvent::Message { from, text }),
+                            None => break 'session (
+                                "Received a malformed message.".to_string(),
+                                false,
+                            ),
+                        },
                         Err(_) => break 'session ("Received a malformed message.".to_string(), false),
                     },
                     Ok(_) => break 'session ("Unexpected handshake frame.".to_string(), false),
@@ -490,7 +534,7 @@ async fn run_session(
                             idle_warned = false;
                             emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
                         }
-                        match session.encrypt(text.as_bytes()) {
+                        match session.encrypt(&encode_message(&nickname, &text)) {
                             Ok(frame) => {
                                 if send_frame(&mut writer, &frame).await.is_err() {
                                     break 'session ("The other person disconnected.".to_string(), true);
@@ -667,4 +711,63 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Narco");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_message, encode_message};
+
+    #[test]
+    fn a_name_and_text_survive_a_round_trip() {
+        let raw = encode_message("alice", "hello there");
+        assert_eq!(
+            decode_message(&raw),
+            Some(("alice".to_string(), "hello there".to_string()))
+        );
+    }
+
+    #[test]
+    fn no_name_is_allowed() {
+        let raw = encode_message("", "anonymous");
+        assert_eq!(
+            decode_message(&raw),
+            Some((String::new(), "anonymous".to_string()))
+        );
+    }
+
+    /// A name cannot smuggle a separator and pretend the rest is the message,
+    /// nor claim to be someone else by embedding a second field.
+    #[test]
+    fn a_name_cannot_forge_the_separator() {
+        let raw = encode_message("alice\0bob", "hi");
+        let (from, text) = decode_message(&raw).unwrap();
+        assert_eq!(from, "alicebob");
+        assert_eq!(text, "hi");
+    }
+
+    /// The message keeps every byte it was given, separators included, because
+    /// only the first NUL divides the two fields.
+    #[test]
+    fn text_may_contain_anything() {
+        let body = "line\0with a nul and \u{1f600} and \n newline";
+        let raw = encode_message("bob", body);
+        let (from, text) = decode_message(&raw).unwrap();
+        assert_eq!(from, "bob");
+        assert_eq!(text, body);
+    }
+
+    /// A peer on an older build sends bare text with no separator at all; it
+    /// should still be readable rather than rejected.
+    #[test]
+    fn a_message_without_a_name_field_still_reads() {
+        assert_eq!(
+            decode_message(b"just text"),
+            Some((String::new(), "just text".to_string()))
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_is_refused_rather_than_mangled() {
+        assert_eq!(decode_message(&[0xff, 0xfe, 0x00, b'h']), None);
+    }
 }
