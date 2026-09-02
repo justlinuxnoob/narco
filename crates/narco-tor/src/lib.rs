@@ -13,24 +13,31 @@
 //!
 //! See PROTOCOL.md §11.
 
-// `deny`, not `forbid`: calling tor's C entry point on iOS needs `unsafe`, and
-// `forbid` cannot be lifted even locally. It stays denied everywhere except the
-// one module that talks to C.
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
+// The daemon engine, and the identity/transport that drive it. iOS cannot
+// execute a second binary, so none of this is compiled there.
+#[cfg(not(target_os = "ios"))]
 pub mod daemon;
 pub mod onion;
-// iOS runs the same C tor in this process; see the module for why. The feature
-// exists only so this module can be type-checked off iOS — linking still needs
-// the framework, but a compile error should not cost a CI round trip.
-#[cfg(any(target_os = "ios", feature = "check-embedded"))]
-pub mod embedded;
 pub mod status;
+#[cfg(not(target_os = "ios"))]
 pub mod transport;
+
+// The iOS engine: Arti in this process.
+#[cfg(target_os = "ios")]
+pub mod arti_transport;
+#[cfg(target_os = "ios")]
+pub mod identity;
 pub mod wire;
 
+#[cfg(not(target_os = "ios"))]
 pub use daemon::{DaemonError, TorDaemon};
 pub use onion::{onion_key, OnionKey};
 pub use status::{Status, TorError};
+#[cfg(not(target_os = "ios"))]
 pub use transport::TorTransport;
+// Same name, same three methods, same statuses — the app never learns which.
+#[cfg(target_os = "ios")]
+pub use arti_transport::TorTransport;
 pub use wire::{run_handshake, ConnectError, Connected};

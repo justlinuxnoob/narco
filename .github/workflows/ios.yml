@@ -77,54 +77,6 @@ jobs:
         working-directory: app
         run: npm ci
 
-      # The same C tor the other three platforms run, as a static library
-      # instead of a binary — because iOS will not execute a second binary.
-      # Published by the Tor.framework project, which is what Onion Browser and
-      # Orbot iOS ship, and the release below is tor 0.4.9.11: the identical
-      # version the Expert Bundle gives Windows, Linux and Android.
-      # The same C tor the other three platforms run, as a static library
-      # rather than a binary — because iOS will not execute a second binary.
-      # Published by the Tor.framework project, which is what Onion Browser and
-      # Orbot iOS ship, and this release is tor 0.4.9.11: the identical version
-      # the Expert Bundle gives Windows, Linux and Android.
-      - name: Fetch the tor xcframework
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG=v409.11.2
-          url="https://github.com/iCepa/Tor.framework/releases/download/$TAG/tor.xcframework.zip"
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o tor-xcf.zip "$url"
-          mkdir -p vendor && unzip -q tor-xcf.zip -d vendor
-          ls vendor/tor.xcframework
-
-          # One slice per target. Device and simulator are different libraries
-          # and linking the wrong one fails late and confusingly.
-          dev="$PWD/vendor/tor.xcframework/ios-arm64"
-          sim="$PWD/vendor/tor.xcframework/ios-arm64_x86_64-simulator"
-          test -d "$dev" && test -d "$sim"
-          # One variable for every later step; build.rs picks device or
-          # simulator from the target it is compiling for.
-          # Arranged by Xcode's platform name so one search path serves both.
-          # Naming them after the slices instead meant the linker took whichever
-          # came first and refused the architecture mismatch.
-          mkdir -p vendor/tor/iphoneos vendor/tor/iphonesimulator
-          cp -R "$dev/tor.framework" vendor/tor/iphoneos/
-          cp -R "$sim/tor.framework" vendor/tor/iphonesimulator/
-          echo "NARCO_TOR_XCFRAMEWORK=$PWD/vendor/tor.xcframework" >> "$GITHUB_ENV"
-
-          # Reported, never gated. Gating on this rejected a correct framework
-          # twice — once on nm's flags, once because `grep -q` closes the pipe
-          # on its first match, `strings` dies of SIGPIPE and `pipefail` calls
-          # the pipeline failed, so *finding* the symbol is what made the check
-          # say it was missing. Linking is the real test and says "undefined
-          # symbol: _tor_run_main" plainly enough.
-          lib="$(find "$dev" -type f -name tor | head -1)"
-          echo "device library: ${lib:-none found}"
-          if [ -n "$lib" ]; then
-            found=$(strings -a "$lib" 2>/dev/null | grep -cx "tor_run_main" || true)
-            echo "tor_run_main occurrences: ${found:-0}"
-          fi
-
       # Answers the question that actually matters first: does Arti compile for
       # a real iPhone at all? It pulls in a large dependency tree and a C SQLite
       # build, and if this fails nothing downstream is worth attempting.
@@ -145,25 +97,6 @@ jobs:
       - name: Initialise the iOS project
         working-directory: app
         run: npm run tauri ios init
-
-      # Tell Xcode to link tor, because cargo cannot.
-      #
-      # Tauri compiles our Rust to a static library and Xcode performs the final
-      # link. build.rs emitting `cargo:rustc-link-lib=framework=tor` only has an
-      # effect when rustc itself links a binary — for a staticlib those flags go
-      # nowhere, which is why every symbol resolved at compile time and none at
-      # link time.
-      #
-      # The script merges into existing settings rather than adding a second
-      # copy of the key, and is tested against a sample project file in CI
-      # before it touches the real one.
-      - name: Link the tor framework into the Xcode project
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/link-tor-into-xcode.py \
-            app/src-tauri/gen/apple/narco-app.xcodeproj/project.pbxproj \
-            "$PWD/vendor/tor"
 
       # Unsigned, for the simulator. This proves the whole app links — Rust,
       # Arti and the Tauri iOS shell — without needing a signing identity, so it

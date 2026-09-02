@@ -198,9 +198,7 @@ pub fn find_tor_binary() -> Result<PathBuf, DaemonError> {
 
 /// A running `tor` process plus an authenticated control connection.
 pub struct TorDaemon {
-    /// None on iOS, where tor runs on a thread in this process rather than as
-    /// a child, because iOS forbids executing a second binary.
-    child: Option<Child>,
+    child: Child,
     control: TcpStream,
     socks_port: u16,
     /// Kept so the directory is removed when the daemon shuts down.
@@ -216,9 +214,6 @@ impl TorDaemon {
         data_dir: &Path,
         mut on_progress: impl FnMut(u8, &str),
     ) -> Result<Self, DaemonError> {
-        // There is no binary to find on iOS — tor is linked into this
-        // executable and started on a thread instead.
-        #[cfg(not(target_os = "ios"))]
         let tor = find_tor_binary()?;
 
         // tor refuses to start against a data directory it cannot make sense
@@ -257,7 +252,6 @@ impl TorDaemon {
         std::fs::write(&torrc, b"")
             .map_err(|e| DaemonError::Spawn(format!("could not write {}: {e}", torrc.display())))?;
 
-        #[cfg(not(target_os = "ios"))]
         let mut cmd = Command::new(&tor);
 
         // tor is a console program and Narco is a windowed one, so without this
@@ -273,7 +267,6 @@ impl TorDaemon {
         // are 24 MB, and path selection does not consult them — tor picks for
         // subnet and family diversity, not country. They matter only for the
         // country-based node rules this app never sets.
-        #[cfg(not(target_os = "ios"))]
         if let Some(dir) = tor.parent() {
             for (option, name) in [("GeoIPFile", "geoip"), ("GeoIPv6File", "geoip6")] {
                 let path = dir.join(name);
@@ -288,7 +281,7 @@ impl TorDaemon {
         // copies and dies with "undefined symbol: evutil_secure_rng_add_bytes".
         // Windows resolves DLLs next to the executable automatically, so this
         // is only needed on Unix.
-        #[cfg(all(unix, not(target_os = "ios")))]
+        #[cfg(unix)]
         if let Some(dir) = tor.parent() {
             let mut paths = vec![dir.to_path_buf()];
             if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
@@ -299,96 +292,62 @@ impl TorDaemon {
             }
         }
 
-        // The configuration, built once. The child-process path passes it as
-        // arguments; on iOS the same list goes to tor's C entry point, so the
-        // two platforms cannot drift apart in how tor is set up.
-        let args: Vec<String> = vec![
-            "-f".into(),
-            torrc.to_string_lossy().into_owned(),
-            "DataDirectory".into(),
-            data_dir.to_string_lossy().into_owned(),
-            "SocksPort".into(),
-            "auto".into(),
-            "ControlPort".into(),
-            "auto".into(),
-            "ControlPortWriteToFile".into(),
-            control_file.to_string_lossy().into_owned(),
-            "CookieAuthentication".into(),
-            "1".into(),
-            "ClientOnly".into(),
-            "1".into(),
+        let mut child = cmd
+            .args(["-f", &torrc.to_string_lossy()])
+            .args(["DataDirectory", &data_dir.to_string_lossy()])
+            .args(["SocksPort", "auto"])
+            .args(["ControlPort", "auto"])
+            .args(["ControlPortWriteToFile", &control_file.to_string_lossy()])
+            .args(["CookieAuthentication", "1"])
+            .args(["ClientOnly", "1"])
+            // Tie the daemon's life to ours. Windows does not kill a child
+            // when its parent dies, and the Drop that used to do it never runs
+            // when the window closes and the process exits — so every session
+            // left an orphaned tor holding this directory's lock, and the next
+            // launch died against it with "another Tor process is running".
+            // tor watches this pid and exits once it is gone, which covers a
+            // crash or a kill as well as a clean exit.
+            .args(["__OwningControllerProcess", &std::process::id().to_string()])
             // Quieter and faster: we never act as a relay or need IPv6-only.
-            "AvoidDiskWrites".into(),
-            "1".into(),
-            // Tie the daemon's life to ours. Windows does not kill a child when
-            // its parent dies, and the Drop that used to do it never runs when
-            // the window closes — so every session left an orphaned tor holding
-            // this directory's lock, and the next launch died against it. tor
-            // watches this pid and exits once it is gone, which covers a crash
-            // or a kill as well as a clean exit. In-process this is our own pid,
-            // so it simply never fires.
-            "__OwningControllerProcess".into(),
-            std::process::id().to_string(),
-        ];
+            .args(["AvoidDiskWrites", "1"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| DaemonError::Spawn(format!("{e} (tried to run {})", tor.display())))?;
 
-        // Same tor and the same configuration on every platform; only the way
-        // it is started differs, because iOS will not execute a second binary.
+        // tor prints bootstrap lines on stdout; that is our progress source.
+        let stdout = child.stdout.take().ok_or_else(|| {
+            DaemonError::Spawn("tor produced no stdout to read progress from".into())
+        })?;
+
+        // Read tor's output from the moment it starts rather than from when
+        // the control port appears. Whatever kills it during startup — a
+        // locked data directory, a port it cannot open, a rejected option — it
+        // explains on the way out, and the old code only began reading at a
+        // point a dying tor never reaches. The one case that most needs an
+        // explanation was the one case that threw it away.
         let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel();
         let recent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-
-        #[cfg(not(target_os = "ios"))]
-        let mut child = {
-            let mut child = cmd
-                .args(&args)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|e| DaemonError::Spawn(format!("{e} (tried to run {})", tor.display())))?;
-
-            // Read tor's output from the moment it starts rather than from
-            // when the control port appears. Whatever kills it during startup
-            // — a locked data directory, a port it cannot open, a rejected
-            // option — it explains on the way out, and reading only from a
-            // point a dying tor never reaches threw that away.
-            let stdout = child.stdout.take().ok_or_else(|| {
-                DaemonError::Spawn("tor produced no stdout to read progress from".into())
-            })?;
-            pump(stdout, false, recent.clone(), line_tx.clone());
-            if let Some(stderr) = child.stderr.take() {
-                pump(stderr, true, recent.clone(), line_tx.clone());
-            }
-            Some(child)
-        };
-
-        #[cfg(target_os = "ios")]
-        let mut child: Option<Child> = {
-            crate::embedded::start(&args).map_err(DaemonError::Spawn)?;
-            None
-        };
-
+        pump(stdout, false, recent.clone(), line_tx.clone());
+        if let Some(stderr) = child.stderr.take() {
+            pump(stderr, true, recent.clone(), line_tx.clone());
+        }
         // The last sender, so the bootstrap loop sees the channel close when
-        // tor's output ends instead of waiting out the timeout. On iOS the
-        // event connection below takes its own clone first.
-        #[cfg(not(target_os = "ios"))]
+        // tor's output ends instead of waiting out the timeout.
         drop(line_tx);
 
         let control_port =
-            match wait_for_startup_file(&control_file, child.as_mut(), "control port file").await {
+            match wait_for_startup_file(&control_file, &mut child, "control port file").await {
                 Ok(bytes) => parse_control_port(&bytes)?,
                 Err(e) => return Err(with_tor_output(e, &recent).await),
             };
-        let cookie = match wait_for_startup_file(
-            &cookie_file,
-            child.as_mut(),
-            "authentication cookie",
-        )
-        .await
-        {
-            Ok(bytes) => bytes,
-            Err(e) => return Err(with_tor_output(e, &recent).await),
-        };
+        let cookie =
+            match wait_for_startup_file(&cookie_file, &mut child, "authentication cookie").await {
+                Ok(bytes) => bytes,
+                Err(e) => return Err(with_tor_output(e, &recent).await),
+            };
 
         let mut control = TcpStream::connect(("127.0.0.1", control_port))
             .await
@@ -403,23 +362,6 @@ impl TorDaemon {
         if let Err(e) = command_on(&mut control, "TAKEOWNERSHIP\r\n").await {
             // Not fatal on its own — the pid check above still applies.
             tracing::warn!("tor did not accept TAKEOWNERSHIP: {e}");
-        }
-
-        // In-process there is no stdout, so bootstrap progress arrives as
-        // STATUS_CLIENT events on the control port instead. Those are the same
-        // lines `parse_bootstrap` already understands — it was written for
-        // both shapes — so the loop below is unchanged. A second connection
-        // keeps the event stream from interleaving with command replies on the
-        // first.
-        #[cfg(target_os = "ios")]
-        {
-            let mut events = TcpStream::connect(("127.0.0.1", control_port))
-                .await
-                .map_err(|e| DaemonError::Control(format!("event connection failed: {e}")))?;
-            authenticate(&mut events, &cookie).await?;
-            command_on(&mut events, "SETEVENTS STATUS_CLIENT\r\n").await?;
-            pump(events, false, recent.clone(), line_tx.clone());
-            drop(line_tx);
         }
 
         let socks_port = read_socks_port(&mut control).await?;
@@ -532,9 +474,7 @@ impl Drop for TorDaemon {
     fn drop(&mut self) {
         // `kill_on_drop` handles the process; also clear the data directory so
         // a session leaves nothing behind on disk.
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.start_kill();
-        }
+        let _ = self.child.start_kill();
         let _ = std::fs::remove_dir_all(&self.data_dir);
     }
 }
@@ -643,7 +583,7 @@ async fn with_tor_output(
 /// died rather than as a timeout thirty seconds later.
 async fn wait_for_startup_file(
     path: &Path,
-    mut child: Option<&mut Child>,
+    child: &mut Child,
     what: &str,
 ) -> Result<Vec<u8>, DaemonError> {
     let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
@@ -659,14 +599,10 @@ async fn wait_for_startup_file(
             _ => settled = None,
         }
 
-        // Only when tor is a child. In-process there is no exit to observe;
-        // the deadline below is the backstop there.
-        if let Some(c) = child.as_deref_mut() {
-            if let Ok(Some(status)) = c.try_wait() {
-                return Err(DaemonError::Spawn(format!(
-                    "tor exited ({status}) before writing its {what}"
-                )));
-            }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(DaemonError::Spawn(format!(
+                "tor exited ({status}) before writing its {what}"
+            )));
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(DaemonError::Spawn(format!(
@@ -815,7 +751,7 @@ mod tests {
             .spawn()
             .unwrap();
 
-        let bytes = wait_for_startup_file(&path, Some(&mut child), "cookie")
+        let bytes = wait_for_startup_file(&path, &mut child, "cookie")
             .await
             .unwrap();
         assert_eq!(bytes, [7u8; 32]);
@@ -841,7 +777,7 @@ mod tests {
         let missing = std::env::temp_dir().join("narco-nonexistent-startup-file");
         let _ = std::fs::remove_file(&missing);
 
-        let err = wait_for_startup_file(&missing, Some(&mut child), "control port file")
+        let err = wait_for_startup_file(&missing, &mut child, "control port file")
             .await
             .unwrap_err();
         assert!(

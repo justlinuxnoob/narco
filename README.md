@@ -105,10 +105,12 @@ secret connects to nothing and says nothing.
 No cryptographic primitive is implemented here. Every one comes from an
 established, reviewed crate.
 
-**Tor is the C `tor` daemon** — the same binary Tor Browser ships, currently
-0.4.9.11. Windows, Linux and Android run it as a child process. iOS cannot
-execute a second binary, so there the identical version is linked into the app
-and started on a thread instead. One implementation, four platforms.
+**Tor is the C `tor` daemon** on Windows, Linux and Android — the same binary
+Tor Browser ships, currently 0.4.9.11, run as a child process.
+
+**iOS uses Arti**, the Rust Tor implementation, because iOS forbids executing a
+second binary — which is also why no Tor Browser exists for iOS. Linking the C
+tor there instead is the intended end state and is not done yet.
 
 Known weaknesses are listed in [`SECURITY.md`](SECURITY.md) rather than left
 for a reader to find, including the ones not yet fixed.
