@@ -29,10 +29,27 @@ fn main() {
         )
     });
 
-    // Printed so the build log shows which slice was used. Linking the device
-    // slice into a simulator build fails in exactly the same way as not
-    // linking at all.
-    println!("cargo:warning=linking tor from {dir}");
+    // Pick the slice from the target rather than having the workflow set a
+    // different value per step. That plumbing did not survive the trip through
+    // xcodebuild into its script phase, so the simulator build linked nothing
+    // while the device build was fine. The target is always here.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let slice = if target.ends_with("-sim") || target.starts_with("x86_64-apple-ios") {
+        "ios-arm64_x86_64-simulator"
+    } else {
+        "ios-arm64"
+    };
+    // Accept either the xcframework root or a slice directly, so an already
+    // specific path still works.
+    let dir = if std::path::Path::new(&dir).join("tor.framework").is_dir() {
+        dir
+    } else {
+        format!("{dir}/{slice}")
+    };
+
+    // Printed so the log shows which slice was used. Linking the device slice
+    // into a simulator build fails in exactly the same way as not linking.
+    println!("cargo:warning=linking tor for {target} from {dir}");
     println!("cargo:rustc-link-search=framework={dir}");
     println!("cargo:rustc-link-lib=framework=tor");
 

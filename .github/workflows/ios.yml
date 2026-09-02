@@ -102,8 +102,9 @@ jobs:
           dev="$PWD/vendor/tor.xcframework/ios-arm64"
           sim="$PWD/vendor/tor.xcframework/ios-arm64_x86_64-simulator"
           test -d "$dev" && test -d "$sim"
-          echo "TOR_XCF_DEVICE=$dev" >> "$GITHUB_ENV"
-          echo "TOR_XCF_SIM=$sim" >> "$GITHUB_ENV"
+          # One variable for every later step; build.rs picks device or
+          # simulator from the target it is compiling for.
+          echo "NARCO_TOR_XCFRAMEWORK=$PWD/vendor/tor.xcframework" >> "$GITHUB_ENV"
 
           # Reported, never gated. Gating on this rejected a correct framework
           # twice — once on nm's flags, once because `grep -q` closes the pipe
@@ -122,8 +123,6 @@ jobs:
       # a real iPhone at all? It pulls in a large dependency tree and a C SQLite
       # build, and if this fails nothing downstream is worth attempting.
       - name: Does the Tor engine build for iOS?
-        env:
-          NARCO_TOR_XCFRAMEWORK: ${{ env.TOR_XCF_DEVICE }}
         run: cargo build --manifest-path crates/narco-tor/Cargo.toml --target aarch64-apple-ios
 
       # tauri.conf.json declares resources: ["tor/*"] so the desktop builds
@@ -146,8 +145,6 @@ jobs:
       # runs on every push whether or not the secrets below exist.
       - name: Build for the simulator
         working-directory: app
-        env:
-          NARCO_TOR_XCFRAMEWORK: ${{ env.TOR_XCF_SIM }}
         run: npm run tauri ios build -- --target aarch64-sim
 
       # Everything past here needs an App Store Connect API key. Without the
@@ -240,7 +237,6 @@ jobs:
           # archive existing afterwards is what decides whether the build
           # actually worked.
           echo "--- building and archiving ---"
-          export NARCO_TOR_XCFRAMEWORK="$TOR_XCF_DEVICE"
           (cd app && npm run tauri ios build -- --export-method app-store-connect) || true
 
           # `|| true` on the find as well as the build. Under `set -euo
