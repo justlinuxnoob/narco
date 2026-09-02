@@ -191,6 +191,10 @@ button.small {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* Room above, and everything after it pushed to the bottom of the screen.
+     This is a screen with two buttons on it; crowding them against the title
+     with the Tor status directly underneath made it read as a form. */
+  margin: 5vh 0 auto;
 }
 
 #choose button {

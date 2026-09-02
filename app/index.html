@@ -18,9 +18,7 @@
       <div id="choose">
         <button id="choose-host" type="button">Start a new chat</button>
         <button id="choose-join" class="ghost" type="button">Join a chat</button>
-        <p class="hint">
-          Like a phone call: one of you dials, the other answers.
-        </p>
+        <p class="hint">One of you starts. The other joins.</p>
       </div>
 
       <div id="compose" hidden>
@@ -30,12 +28,14 @@
 
         <button id="add" class="ghost small" type="button">+ add another secret</button>
 
-        <p class="hint" id="compose-hint"></p>
+        <!-- Only once a second secret exists, which is the moment the advice
+             starts being worth reading. -->
+        <p class="hint" id="multi-hint" hidden>
+          Send each one a different way. Intercepting one gets nobody in.
+        </p>
 
         <p class="warn" id="typed-warning" hidden>
-          A code you invent is far easier to guess than a generated one, and
-          anyone who guesses it can join this chat. Use <strong>gen</strong>
-          unless you have a reason not to.
+          An invented code is guessable, and guessing it is enough to join.
         </p>
 
         <details id="settings">
@@ -60,9 +60,8 @@
             </select>
           </label>
           <p class="hint">
-            No message, key or code is ever written to disk. These only change
-            how long things stay in memory and on screen. Tor keeps its own
-            network cache in a folder Narco owns, which holds nothing of yours.
+            Nothing you type is written to disk. These only change how long it
+            stays in memory.
           </p>
         </details>
 
@@ -81,16 +80,15 @@
 
       <details id="diag">
         <summary>diagnostics</summary>
-        <p class="hint">
-          What the app and Tor actually did. No code, address, key or message —
-          but it does contain file paths, which usually include your username.
-          Worth a glance before posting publicly.
-        </p>
         <div class="row">
           <button id="diag-refresh" class="ghost small" type="button">refresh</button>
           <button id="diag-copy" class="ghost small" type="button">copy logs</button>
         </div>
         <pre id="diag-log">(open to load)</pre>
+        <p class="hint">
+          No code, key or message — but it does contain file paths, usually
+          including your username.
+        </p>
       </details>
     </main>
 
@@ -99,35 +97,24 @@
       <h1>narco</h1>
 
       <ol id="stages">
-        <li data-stage="tor"><span class="mark"></span>Joining the Tor network</li>
+        <li data-stage="tor"><span class="mark"></span>Joining Tor</li>
         <li data-stage="publish"><span class="mark"></span>Publishing your address</li>
-        <li data-stage="peer"><span class="mark"></span>Waiting for the other person</li>
-        <li data-stage="verify"><span class="mark"></span>Verifying it's really them</li>
+        <li data-stage="peer"><span class="mark"></span>Waiting for them</li>
+        <li data-stage="verify"><span class="mark"></span>Verifying</li>
       </ol>
 
       <p class="status" id="status">Starting…</p>
       <p class="elapsed"><span id="elapsed">0:00</span> elapsed</p>
 
       <div id="share" hidden>
-        <p class="hint">
-          Send this to the other person — <strong>all of it, in order</strong>.
-          They enter the same secrets and tap join.
-        </p>
+        <p class="hint">Send them all of this, in order.</p>
         <div class="share-row">
           <code id="share-code"></code>
           <button id="share-copy" class="icon" type="button">copy</button>
         </div>
       </div>
 
-      <p class="hint" id="patience">
-        This usually takes <strong>1–2 minutes</strong>, and it is not stuck.
-        Narco has no server, so both apps have to find each other through the
-        Tor network first. Later connections are quicker.
-      </p>
-
-      <p class="hint" id="both-open">
-        The other person needs the app open with the same secrets.
-      </p>
+      <p class="hint" id="patience">Usually 1–2 minutes. It is not stuck.</p>
 
       <div class="row">
         <button id="cancel" class="ghost" type="button">cancel</button>
@@ -161,8 +148,7 @@
       <h1>gone</h1>
       <p class="status" id="ended-reason"></p>
       <p class="hint">
-        The keys were destroyed and the messages are gone. Nothing you said,
-        and no code or key, was ever written to disk.
+        Keys destroyed, messages gone. None of it ever touched the disk.
       </p>
       <div class="row">
         <button id="again" type="button">start over</button>

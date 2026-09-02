@@ -134,11 +134,13 @@ function addSecret(focus = false) {
   remove.addEventListener("click", () => {
     row.remove();
     relabel();
+    updateTypedWarning();
   });
 
   row.append(n, input, gen, copy, remove);
   secretsBox.append(row);
   relabel();
+  updateTypedWarning();
   if (focus) input.focus();
 }
 
@@ -152,6 +154,9 @@ function updateTypedWarning() {
     (i) => i.value.length > 0 && i.dataset.generated !== "1",
   );
   $("typed-warning").hidden = mode !== "host" || !typed;
+  // Advice about sending secrets separately is noise until there is a second
+  // one to send.
+  $("multi-hint").hidden = secretInputs().length < 2;
 }
 
 // --- choosing a side ------------------------------------------------------
@@ -163,19 +168,11 @@ const LEAD = {
   host: "Send this code to the other person, then press start.",
   join: "Paste the code they sent you.",
 };
-const HINT = {
-  host:
-    "Send it however you like — message, call, in person. Add a second " +
-    "secret and send it a different way, and intercepting one gets nobody in.",
-  join: "Enter every secret they sent, in the same order.",
-};
-
 async function choose(next: "host" | "join") {
   mode = next;
   $("choose").hidden = true;
   $("compose").hidden = false;
   $("compose-lead").textContent = LEAD[next];
-  $("compose-hint").textContent = HINT[next];
   // Label it for this side, unless Tor is still coming up and the button is
   // busy saying so.
   setStartReady(!goBtn.disabled);
@@ -247,11 +244,10 @@ function startElapsed() {
   elapsedTimer = window.setInterval(() => {
     const s = Math.floor((Date.now() - startedAt) / 1000);
     $("elapsed").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-    if (s > 240) {
-      $("patience").innerHTML =
-        "Taking longer than usual. It can still succeed — but check that the " +
-        "other person has the app open with <strong>exactly</strong> the same " +
-        "secrets, in the same order.";
+    if (s > 150) {
+      $("patience").textContent =
+        "Taking longer than usual. Check they have the app open with exactly " +
+        "the same secrets, in the same order.";
     }
   }, 1000);
 }
