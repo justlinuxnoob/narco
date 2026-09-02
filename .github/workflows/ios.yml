@@ -27,7 +27,11 @@ jobs:
       ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
       ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
       ASC_KEY_P8: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
-      APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+      # Never empty. An absent variable and an empty one are different things
+      # to `tauri ios init`: absent means "unsigned build, carry on", empty is a
+      # hard error. Hoisting the secrets to job level turned the first into the
+      # second and broke a step that had been passing.
+      APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM || 'XXXXXXXXXX' }}
     steps:
       - uses: actions/checkout@v4
 
