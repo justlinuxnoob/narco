@@ -94,20 +94,37 @@ jobs:
 
       # Everything past here needs an App Store Connect API key. Without the
       # secrets the job still succeeds, having proved the build.
+      # Everything past here needs an App Store Connect API key. Without the
+      # secrets the job still succeeds, having proved the build.
+      #
+      # The condition reads `secrets`, not `env`: a step's own env block is not
+      # in scope for its own `if`, so testing env there is always false and the
+      # upload would never run even once the secrets existed.
       - name: Sign and upload to TestFlight
-        if: ${{ env.ASC_KEY_ID != '' }}
+        if: ${{ secrets.APP_STORE_CONNECT_KEY_ID != '' }}
         working-directory: app
         env:
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           ASC_KEY_P8: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
         run: |
           set -euo pipefail
-          mkdir -p ~/.appstoreconnect/private_keys
-          echo "$ASC_KEY_P8" > "~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          # $HOME, not ~: a tilde inside quotes is not expanded, and this would
+          # have written the key to a directory literally named "~" while Xcode
+          # looked in the real one. Xcode reads this exact path when asked to
+          # manage signing itself, which is what -allowProvisioningUpdates does.
+          keys="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$keys"
+          printf '%s\n' "$ASC_KEY_P8" > "$keys/AuthKey_${ASC_KEY_ID}.p8"
+          chmod 600 "$keys/AuthKey_${ASC_KEY_ID}.p8"
+
           npm run tauri ios build -- --export-method app-store-connect
-          xcrun altool --upload-app -f "$(find src-tauri/gen/apple/build -name '*.ipa' | head -1)" \
-            -t ios --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+
+          ipa="$(find src-tauri/gen/apple/build -name '*.ipa' | head -1)"
+          test -n "$ipa" || { echo "::error::no .ipa was produced"; exit 1; }
+          xcrun altool --upload-app -f "$ipa" -t ios \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
 
       - uses: actions/upload-artifact@v4
         if: always()
