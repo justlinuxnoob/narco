@@ -84,18 +84,15 @@ function addSecret(focus = false) {
   input.autocomplete = "off";
   input.spellcheck = false;
   input.addEventListener("keydown", (e) => {
-    // Enter runs whichever side the user already chose.
-    if (e.key === "Enter" && mode) start(mode === "host");
+    // Enter hosts, which is the side that has something to share.
+    if (e.key === "Enter" && !hostBtn.disabled) start(true);
   });
 
   // Track where each value came from. A generated code carries 130 bits; a
   // typed one is usually nearer 30, and the room's onion address is derived
   // from it — so a guessable code is a joinable room, guessed offline against
   // the Tor directory without ever touching either of us.
-  input.addEventListener("input", () => {
-    delete input.dataset.generated;
-    updateTypedWarning();
-  });
+  input.addEventListener("input", () => updateTypedWarning());
 
   // Every secret gets its own generate, not just the first — a hand-typed
   // second secret is usually far weaker than a generated one.
@@ -106,7 +103,6 @@ function addSecret(focus = false) {
   gen.title = "generate a random secret";
   gen.addEventListener("click", async () => {
     input.value = await invoke<string>("generate_code");
-    input.dataset.generated = "1";
     setError("");
     updateTypedWarning();
     flash(gen, "done");
@@ -147,65 +143,25 @@ function addSecret(focus = false) {
   if (focus) input.focus();
 }
 
-/**
- * Warn when any secret was typed rather than generated — but only when
- * starting. The joiner types by definition: they are copying what they were
- * sent, and telling them off for it would be noise.
- */
+// A code that looks generated is 130 bits; anything else is usually nearer 30,
+// and the room's address derives from it — so a guessable code is a joinable
+// room. Judged on the code itself rather than on whether this app generated it,
+// because someone pasting a code their friend generated should not be scolded.
+const GENERATED_ALPHABET = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{20,}$/;
+
+function looksGenerated(code: string) {
+  return GENERATED_ALPHABET.test(code);
+}
+
+/** Warn when a code was made up, and point at the fix. */
 function updateTypedWarning() {
-  const typed = secretInputs().some(
-    (i) => i.value.length > 0 && i.dataset.generated !== "1",
-  );
-  $("typed-warning").hidden = mode !== "host" || !typed;
-  // Advice about sending secrets separately is noise until there is a second
-  // one to send.
+  const values = secretInputs().map((i) => i.value.trim());
+  const weak = values.some((v) => v.length > 0 && !looksGenerated(v));
+  $("typed-warning").hidden = !weak;
   $("multi-hint").hidden = secretInputs().length < 2;
 }
 
-// --- choosing a side ------------------------------------------------------
-
-/** null until the user says whether they are starting or joining. */
-let mode: "host" | "join" | null = null;
-
-const LEAD = {
-  host: "Send this code to the other person, then press start.",
-  join: "Paste the code they sent you.",
-};
-async function choose(next: "host" | "join") {
-  mode = next;
-  $("choose").hidden = true;
-  $("compose").hidden = false;
-  $("compose-lead").textContent = LEAD[next];
-  // Label it for this side, unless Tor is still coming up and the button is
-  // busy saying so.
-  setStartReady(!goBtn.disabled);
-  setError("");
-
-  secretsBox.replaceChildren();
-  addSecret();
-  const first = secretInputs()[0];
-  if (next === "host") {
-    // Generate up front. The strongest option should be the one you get by
-    // doing nothing, not the one you get by noticing a button.
-    first.value = await invoke<string>("generate_code");
-    first.dataset.generated = "1";
-    first.select();
-  } else {
-    first.focus();
-  }
-  updateTypedWarning();
-}
-
-$("choose-host").addEventListener("click", () => choose("host"));
-$("choose-join").addEventListener("click", () => choose("join"));
-$("back").addEventListener("click", () => {
-  mode = null;
-  $("compose").hidden = true;
-  $("choose").hidden = false;
-  secretsBox.replaceChildren();
-  setError("");
-});
-
+addSecret();
 $("add").addEventListener("click", () => addSecret(true));
 
 // Join Tor immediately, without waiting for secrets — it needs none. This hides
@@ -317,12 +273,14 @@ async function start(host: boolean) {
   }
 }
 
-// Starting is disabled until Tor is ready — pressing earlier would just wait
-// on a connection that hasn't happened yet, which looks broken. Choosing a
-// side stays available, so the code can be generated and sent meanwhile.
-const goBtn = $<HTMLButtonElement>("go");
-goBtn.disabled = true;
-goBtn.addEventListener("click", () => start(mode === "host"));
+// Both are disabled until Tor is ready — pressing earlier would just wait on a
+// connection that hasn't happened yet, which looks broken.
+const hostBtn = $<HTMLButtonElement>("host");
+const joinBtn = $<HTMLButtonElement>("join");
+hostBtn.disabled = true;
+joinBtn.disabled = true;
+hostBtn.addEventListener("click", () => start(true));
+joinBtn.addEventListener("click", () => start(false));
 $("share-copy").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText($("share-code").textContent ?? "");
@@ -332,14 +290,11 @@ $("share-copy").addEventListener("click", async () => {
   }
 });
 
-/** Reflect Tor readiness on the action button. */
+/** Reflect Tor readiness on both action buttons. */
 function setStartReady(ready: boolean) {
-  goBtn.disabled = !ready;
-  if (!ready) {
-    goBtn.textContent = "connecting to tor…";
-  } else if (mode) {
-    goBtn.textContent = mode === "host" ? "start & wait for them" : "join";
-  }
+  hostBtn.disabled = !ready;
+  joinBtn.disabled = !ready;
+  hostBtn.textContent = ready ? "Host" : "connecting to tor…";
 }
 
 $("cancel").addEventListener("click", async () => {
@@ -429,12 +384,11 @@ function endWith(reason: string) {
 }
 
 $("again").addEventListener("click", () => {
-  // Back to the choice, not to a half-filled form: the next conversation gets
-  // its own code, and the previous one's must not linger on screen.
-  mode = null;
+  // A fresh form. The previous conversation's code must not linger on screen,
+  // and the next one should get its own.
   secretsBox.replaceChildren();
-  $("compose").hidden = true;
-  $("choose").hidden = false;
+  addSecret(true);
+  updateTypedWarning();
   setError("");
   show("entry");
 });
