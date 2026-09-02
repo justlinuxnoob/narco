@@ -112,26 +112,76 @@ jobs:
           echo "The tor daemon ships in jniLibs on Android; see android.yml." \
             > app/src-tauri/tor/README.txt
 
-      # A debug-signed APK: installable on a real phone straight away, which a
-      # release APK is not without a signing key. Publishing signed builds needs
-      # a keystore held as a repository secret — a decision for the repo owner,
-      # not something to generate here, since a key that changes every build
-      # cannot be upgraded over.
+      # Release, not debug. A debug build carries unstripped Rust symbols — 144
+      # MB per ABI, 586 MB of APK — which is not a thing anyone will download.
+      #
+      # --target is explicit because `tauri android init` configures four ABIs
+      # and Tor publishes only three. Without this, x86 got our library and no
+      # daemon, so the app would install on such a device and then fail looking
+      # for a tor that was never packaged.
       - name: Build the APK
         working-directory: app
-        run: npm run tauri android build -- --apk --debug
+        run: |
+          npm run tauri android build -- --apk \
+            --target aarch64 --target armv7 --target x86_64
+
+      # Android refuses to install an unsigned APK, and `tauri android build`
+      # without --debug produces one. Prefer a real key held as a repository
+      # secret so builds can upgrade over each other; fall back to a throwaway
+      # so the workflow still yields something installable.
+      - name: Sign the APK
+        id: sign
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          unsigned="$(find app/src-tauri/gen/android -name '*-unsigned.apk' -o -name '*release*.apk' | head -1)"
+          test -n "$unsigned"
+          echo "signing $unsigned"
+
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > key.jks
+            PASS="$KEYSTORE_PASSWORD"
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret; signing with a throwaway key. This APK cannot be upgraded over — uninstall the previous version first."
+            PASS=narcobuild
+            keytool -genkeypair -dname "CN=Narco, OU=Narco, O=Narco, L=-, S=-, C=-" \
+              -alias narco -keystore key.jks -storepass "$PASS" -keypass "$PASS" \
+              -keyalg RSA -keysize 4096 -validity 10000
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          "$BT/zipalign" -p -f 4 "$unsigned" aligned.apk
+          "$BT/apksigner" sign --ks key.jks --ks-pass "pass:$PASS" \
+            --key-pass "pass:$PASS" --ks-key-alias narco --out signed.apk aligned.apk
+          "$BT/apksigner" verify --print-certs signed.apk | head -3
+          rm -f key.jks aligned.apk
 
       - name: Collect the APK
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out
+          # A manual run has no tag, and "Narco_main_android.apk" tells nobody
+          # which build they are holding.
           V="${{ github.event.inputs.tag || github.ref_name }}"; V="${V#v}"
-          find app/src-tauri/gen/android -name '*.apk' -print
-          apk="$(find app/src-tauri/gen/android -name '*.apk' | head -1)"
-          test -n "$apk"
-          cp "$apk" "out/Narco_${V}_android.apk"
+          if [ "$V" = "main" ]; then
+            V="$(node -p "require('./app/src-tauri/tauri.conf.json').version")-dev"
+          fi
+          cp signed.apk "out/Narco_${V}_android.apk"
           ls -la out
+          du -h out/*.apk
+          # Every ABI that ships must carry a daemon, or the app installs and
+          # then cannot start on that device.
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            unzip -l "out/Narco_${V}_android.apk" | grep -q "lib/$abi/libTor.so" \
+              || { echo "::error::$abi has no libTor.so"; exit 1; }
+          done
+          echo "every shipped ABI carries the tor daemon"
 
       - uses: actions/upload-artifact@v4
         with:
