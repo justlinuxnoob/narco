@@ -47,6 +47,15 @@ jobs:
           # — which is how a stale `forbid(unsafe_code)` reached a release.
           cargo check --manifest-path crates/narco-tor/Cargo.toml --features check-embedded
 
+      # The Xcode project patch, against the four shapes a generated project
+      # actually uses. Getting this wrong cost several release builds, and it
+      # only ever ran on a macOS runner.
+      - name: Xcode link patch handles every setting shape
+        run: |
+          cp scripts/testdata/sample.pbxproj /tmp/t.pbxproj
+          python3 scripts/link-tor-into-xcode.py /tmp/t.pbxproj /x/tor.xcframework
+          python3 scripts/link-tor-into-xcode.py /tmp/t.pbxproj /x/tor.xcframework
+
 
   # Only on pull requests. A push to main that matters is tagged, and the tag
   # already builds both platforms for real — running this too meant four jobs

@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Add the tor framework to every build configuration in an Xcode project.
+r"""Add the tor framework to every build configuration in an Xcode project.
 
 Merges rather than inserts. A second FRAMEWORK_SEARCH_PATHS in a block that
 already has one is a duplicate key, and Xcode takes the last — which would drop
 ours silently and leave the link failing exactly as before.
 
-Matched line-wise, not by balanced parentheses: these values contain
-`$(inherited)` and `$(SRCROOT)`, so a `[^)]*` pattern stops at the first `)`
-inside a variable reference and never sees the setting at all.
+Two shapes have to be handled and both occur in a generated project: a list,
+which Xcode may spread over several lines, and a bare scalar. Matching only
+single lines misses the multi-line form and appends a duplicate key — which is
+the failure this is meant to prevent.
+
+Not matched by balanced parentheses either: these values contain `$(inherited)`
+and `$(SRCROOT)`, so a `[^)]*` pattern stops at the first `)` inside a variable
+reference and never sees the setting at all. `\);` is the reliable terminator,
+since a `)` inside a variable reference is never followed by a semicolon.
 """
 import re
 import sys
@@ -23,16 +29,23 @@ blocks = s.count("buildSettings = {")
 
 
 def merge(setting: str, additions: str, body: str) -> str:
-    pat = re.compile(rf"^([ \t]*){setting} = (.+);[ \t]*$", re.M)
-    m = pat.search(body)
-    if not m:
-        return f'\n\t\t\t\t{setting} = ("$(inherited)", {additions});' + body
-    indent, value = m.group(1), m.group(2).strip()
-    if value.startswith("(") and value.endswith(")"):
-        merged = value[:-1].rstrip().rstrip(",") + f", {additions})"
-    else:
-        merged = f"({value}, {additions})"
-    return pat.sub(lambda _: f"{indent}{setting} = {merged};", body, count=1)
+    # A list, possibly spanning lines.
+    lst = re.compile(rf"^([ \t]*){setting} = \((.*?)\);", re.M | re.S)
+    m = lst.search(body)
+    if m:
+        indent, inner = m.group(1), m.group(2).strip().rstrip(",")
+        merged = f"{indent}{setting} = ({inner}, {additions});"
+        return lst.sub(lambda _: merged, body, count=1)
+
+    # A bare scalar on one line.
+    scalar = re.compile(rf"^([ \t]*){setting} = ([^(\n][^;]*);[ \t]*$", re.M)
+    m = scalar.search(body)
+    if m:
+        indent, value = m.group(1), m.group(2).strip()
+        merged = f"{indent}{setting} = ({value}, {additions});"
+        return scalar.sub(lambda _: merged, body, count=1)
+
+    return f'\n\t\t\t\t{setting} = ("$(inherited)", {additions});' + body
 
 
 def patch(m: re.Match) -> str:
@@ -46,11 +59,14 @@ s = re.sub(r"buildSettings = \{(.*?)\};", patch, s, flags=re.S)
 open(pbx, "w").write(s)
 
 out = open(pbx).read()
-for setting, needle in (("FRAMEWORK_SEARCH_PATHS", "ios-arm64"), ("OTHER_LDFLAGS", '"tor"')):
-    hits = [ln for ln in out.splitlines() if setting in ln and needle in ln]
-    assert len(hits) == blocks, f"{setting}: {len(hits)} of {blocks} build configurations"
+configs = re.findall(r"buildSettings = \{(.*?)\};", out, re.S)
+assert len(configs) == blocks, f"{len(configs)} blocks after, {blocks} before"
 
-for i, b in enumerate(re.findall(r"buildSettings = \{(.*?)\};", out, re.S), 1):
+for i, b in enumerate(configs, 1):
+    # Checked per block rather than per line: Xcode writes lists across several
+    # lines, so the setting name and the value it gained are not on one line.
+    assert "ios-arm64" in b, f"block {i}: tor search path missing"
+    assert '"-framework", "tor"' in b, f"block {i}: tor ldflag missing"
     for setting in add:
         n = len(re.findall(rf"^[ \t]*{setting} = ", b, re.M))
         assert n == 1, f"block {i}: {setting} appears {n} times"
