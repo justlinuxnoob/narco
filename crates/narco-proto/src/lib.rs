@@ -26,6 +26,7 @@ pub mod code;
 pub mod error;
 pub mod frame;
 pub mod kdf;
+pub mod message;
 pub mod session;
 
 pub use code::{generate, normalize, validate, GENERATED_LEN, MIN_CODE_LEN};

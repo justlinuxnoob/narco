@@ -42,8 +42,6 @@ jobs:
         run: |
           cargo test --manifest-path crates/narco-proto/Cargo.toml
           cargo test --manifest-path crates/narco-tor/Cargo.toml
-          # The app crate: the message wire format and its decoder live here.
-          cargo test --manifest-path app/src-tauri/Cargo.toml --lib
 
   # Only on pull requests. A push to main that matters is tagged, and the tag
   # already builds both platforms for real — running this too meant four jobs

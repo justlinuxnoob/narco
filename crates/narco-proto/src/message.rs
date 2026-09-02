@@ -1,5 +1,11 @@
 //! What a message looks like once it is decrypted.
 //!
+//! Lives here rather than in the app because it is protocol, not interface:
+//! pure byte handling with a decoder that has to survive whatever a peer
+//! sends. In the app crate its tests could only run on a machine with the
+//! whole desktop toolchain installed, which is a lot of apparatus for parsing
+//! a header.
+//!
 //! The encrypted frame carries bytes; this decides what those bytes mean. A
 //! message is a kind, the sender's chosen name, and a payload — text, or one
 //! piece of a file.
@@ -10,7 +16,7 @@
 //! gets exactly the same protection as anything else said in the room, and the
 //! transport never learns it is carrying a file at all.
 
-use narco_proto::frame::MAX_PLAINTEXT;
+use crate::frame::MAX_PLAINTEXT;
 
 /// A text message.
 pub const KIND_TEXT: u8 = 1;

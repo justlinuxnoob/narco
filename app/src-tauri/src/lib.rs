@@ -5,10 +5,8 @@
 //! webview. Plaintext exists in exactly two places — the running session task
 //! and the on-screen message list — and both are destroyed together.
 
-mod wire_format;
-
 use base64::Engine as _;
-use narco_proto::{Error as ProtoError, Event};
+use narco_proto::{message, Error as ProtoError, Event};
 
 /// Files cross to the webview as text; an event payload cannot carry bytes.
 const B64: base64::engine::general_purpose::GeneralPurpose =
@@ -513,11 +511,11 @@ async fn run_session(
                         emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
                     }
                     match session.handle(&frame) {
-                        Ok(Event::Message(m)) => match wire_format::decode(&m) {
-                            Some(wire_format::Incoming::Text { from, text }) => {
+                        Ok(Event::Message(m)) => match message::decode(&m) {
+                            Some(message::Incoming::Text { from, text }) => {
                                 emit(app, UiEvent::Message { from, text })
                             }
-                            Some(wire_format::Incoming::File {
+                            Some(message::Incoming::File {
                                 from, id, index, total, name, data,
                             }) => {
                                 // Pieces are held until the set is complete. A
@@ -573,7 +571,7 @@ async fn run_session(
                                 idle_warned = false;
                                 emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
                             }
-                            match session.encrypt(&wire_format::encode_text(&nickname, &text)) {
+                            match session.encrypt(&message::encode_text(&nickname, &text)) {
                                 Ok(frame) => {
                                     if send_frame(&mut writer, &frame).await.is_err() {
                                         break 'session ("The other person disconnected.".to_string(), true);
@@ -596,12 +594,12 @@ async fn run_session(
                             // file gets exactly the protection everything else in
                             // the room gets, and the transport never learns it is
                             // carrying a file.
-                            let total = data.len().div_ceil(wire_format::CHUNK).max(1) as u32;
+                            let total = data.len().div_ceil(message::CHUNK).max(1) as u32;
                             let id = next_transfer_id;
                             next_transfer_id = next_transfer_id.wrapping_add(1);
                             let mut failed = false;
-                            for (i, part) in data.chunks(wire_format::CHUNK).enumerate() {
-                                let msg = wire_format::encode_file_chunk(
+                            for (i, part) in data.chunks(message::CHUNK).enumerate() {
+                                let msg = message::encode_file_chunk(
                                     &nickname, id, i as u32, total, &name, part,
                                 );
                                 match session.encrypt(&msg) {
