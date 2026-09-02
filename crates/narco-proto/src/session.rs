@@ -170,7 +170,11 @@ impl Session {
         let spake = self.spake.take().ok_or(Error::WrongPhase)?;
         // SPAKE2 does not fail on a wrong password; it yields a different key.
         // Confirmation in `on_confirm` is what actually rejects a bad code.
-        let k = Zeroizing::new(spake.finish(peer_msg).map_err(|_| Error::ConfirmMismatch)?);
+        // A failure here means the bytes were not a usable SPAKE2 message —
+        // wrong length, wrong side, off the curve. It does not mean the wrong
+        // password: SPAKE2 does not fail on a wrong password, it yields a
+        // different key, and `on_confirm` is what rejects that.
+        let k = Zeroizing::new(spake.finish(peer_msg).map_err(|_| Error::BadHandshake)?);
 
         let role = if self.my_pake.as_slice() < peer_msg {
             Role::A
@@ -408,6 +412,41 @@ mod tests {
 
     /// The headline property: a wrong code must fail closed, not silently
     /// produce a working-looking session.
+    #[test]
+    /// Rubbish is not a guess.
+    ///
+    /// A host counts wrong secrets against a limit and abandons the room once it
+    /// has seen enough of them. Every `spake.finish` failure used to arrive as
+    /// `ConfirmMismatch`, so thirty-three bytes of nonsense counted as somebody
+    /// typing the wrong secret — five junk connections and the host gave up on
+    /// the meeting, telling its owner the codes did not match. Anyone who could
+    /// reach the address could shut the room without ever guessing anything.
+    #[test]
+    fn unreadable_handshake_input_is_not_a_wrong_secret() {
+        let a_pake = Session::new(CODE).unwrap().pake_frame();
+        for junk in [
+            // Right length, all zeroes: not a point on the curve.
+            vec![0u8; a_pake.len()],
+            // Right length, wrong side marker.
+            {
+                let mut v = a_pake.clone();
+                v[1] ^= 0xff;
+                v
+            },
+            // Truncated.
+            a_pake[..a_pake.len() - 1].to_vec(),
+        ] {
+            let mut s = Session::new(CODE).unwrap();
+            match s.handle(&junk) {
+                Err(Error::ConfirmMismatch) => {
+                    panic!("junk was counted as a wrong secret, which lets it close the room")
+                }
+                Err(_) => {}
+                Ok(e) => panic!("junk was accepted: {e:?}"),
+            }
+        }
+    }
+
     #[test]
     fn mismatched_codes_fail_at_confirmation() {
         let mut a = Session::new(CODE).unwrap();

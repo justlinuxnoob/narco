@@ -1,6 +1,6 @@
 [package]
 name = "narco-app"
-version = "0.9.2"
+version = "0.10.0"
 edition = "2021"
 rust-version = "1.82"
 license = "AGPL-3.0-or-later"
@@ -24,6 +24,9 @@ futures = "0.3"
 # Files cross the IPC boundary to the webview as text; the webview cannot hold
 # raw bytes in an event payload.
 base64 = "0.23"
+# The room secrets arrive here as plain `String`s from the webview and would
+# otherwise sit in the heap, un-wiped, for the life of the process.
+zeroize = { version = "1.9", features = ["alloc"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

@@ -16,7 +16,7 @@ type UiEvent =
   | { kind: "message"; from: string; text: string }
   | { kind: "ended"; reason: string }
   | { kind: "idleWarning"; secondsLeft: number; active: boolean }
-  | { kind: "reconnecting" }
+  | { kind: "reconnecting"; attempt: number; of: number }
   | { kind: "reconnected" }
   | { kind: "file"; from: string; name: string; data: string }
   | { kind: "fileProgress"; name: string; sent: number; total: number; outgoing: boolean }
@@ -351,10 +351,30 @@ function addMessage(text: string, who: "me" | "them" | "note", from = "") {
   }
 }
 
+/**
+ * Whether there is a peer on the other end right now.
+ *
+ * While reconnecting there is not. The backend drains and discards everything
+ * except End during that window, but only the text box was being disabled — the
+ * send button and the attach button stayed live, and anything sent through them
+ * was thrown away and then drawn on screen as though it had gone. People
+ * carried on a conversation with nobody, and a whole file could be "sent"
+ * without leaving the machine.
+ */
+let connected = false;
+
+function setComposerEnabled(on: boolean) {
+  connected = on;
+  $<HTMLInputElement>("input").disabled = !on;
+  $<HTMLButtonElement>("attach").disabled = !on;
+  $<HTMLButtonElement>("send").disabled = !on;
+}
+
 $<HTMLFormElement>("composer").addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = input.value;
   if (!text.trim()) return;
+  if (!connected) return;
   input.value = "";
   try {
     await invoke("send", { text });
@@ -369,10 +389,28 @@ $<HTMLFormElement>("composer").addEventListener("submit", async (e) => {
 const fileInput = $<HTMLInputElement>("file");
 $("attach").addEventListener("click", () => fileInput.click());
 
+/**
+ * The most a file may be, matching `message::MAX_CHUNKS * message::CHUNK` in
+ * the protocol crate. Anything larger is refused by the receiver's decoder, so
+ * catching it here is the difference between a clear sentence and a transfer
+ * that dies partway through with no explanation.
+ */
+const MAX_FILE_BYTES = 2048 * 30_000;
+
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files?.[0];
   fileInput.value = ""; // so picking the same file twice still fires
   if (!file) return;
+  if (!connected) return;
+  if (file.size > MAX_FILE_BYTES) {
+    addMessage(
+      `That file is ${Math.round(file.size / 1e6)} MB. The limit is ${Math.round(
+        MAX_FILE_BYTES / 1e6,
+      )} MB.`,
+      "note",
+    );
+    return;
+  }
   // Read here rather than in Rust: the webview's own picker means the app
   // never needs permission to read the disk generally, only the one file the
   // user chose.
@@ -401,7 +439,9 @@ function bytesFrom(b64: string): ArrayBuffer {
   return out.buffer;
 }
 
-const IMAGE_TYPES: Record<string, string> = {
+// No prototype, so a file named `x.constructor` or `x.__proto__` looks up as
+// absent instead of returning an inherited member and taking the image branch.
+const IMAGE_TYPES: Record<string, string> = Object.assign(Object.create(null), {
   png: "image/png",
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
@@ -409,7 +449,7 @@ const IMAGE_TYPES: Record<string, string> = {
   webp: "image/webp",
   avif: "image/avif",
   bmp: "image/bmp",
-};
+});
 
 /** An image is shown; anything else is offered as a download. */
 function addFile(name: string, dataB64: string, who: "me" | "them", from = "") {
@@ -450,6 +490,22 @@ function addFile(name: string, dataB64: string, who: "me" | "them", from = "") {
   li.append(a);
   messages.append(li);
   messages.scrollTop = messages.scrollHeight;
+
+  // Vanish on the same timer as text. Only messages were burning, so with
+  // "vanishing 30s" set, the words disappeared while every photo stayed on
+  // screen for the rest of the session — under a header still promising they
+  // would not. Release the bytes too, not just the element.
+  const secs = burnSeconds();
+  if (secs > 0) {
+    burnTimers.push(
+      window.setTimeout(() => {
+        li.remove();
+        URL.revokeObjectURL(url);
+        const at = blobUrls.indexOf(url);
+        if (at >= 0) blobUrls.splice(at, 1);
+      }, secs * 1000),
+    );
+  }
 }
 
 $("end").addEventListener("click", () => invoke("end_session"));
@@ -469,6 +525,12 @@ function endWith(reason: string) {
   for (const u of blobUrls.splice(0)) URL.revokeObjectURL(u);
   messages.replaceChildren();
   input.value = "";
+  setComposerEnabled(false);
+  // The transfer line holds a filename the other side chose. Ending mid-send
+  // left it there, and it was still on screen when the chat opened for the
+  // *next* conversation.
+  $("transfer").textContent = "";
+  $("transfer").hidden = true;
   // The share box holds the host's secrets in full. It was never cleared, so
   // they stayed in the DOM for the life of the app — visible again the moment
   // anyone hit "start over".
@@ -537,6 +599,7 @@ listen<UiEvent>("narco", ({ payload }) => {
       $("chat-mode").textContent =
         secs > 0 ? `encrypted · vanishing ${secs}s` : "encrypted";
       addMessage("Encrypted. Messages are gone when this ends.", "note");
+      setComposerEnabled(true);
       input.focus();
       break;
     }
@@ -565,14 +628,17 @@ listen<UiEvent>("narco", ({ payload }) => {
     // The conversation is not over, so the messages stay. Only the header
     // changes, and the composer waits until there is somewhere to send.
     case "reconnecting":
-      $("chat-mode").textContent = "reconnecting…";
-      $<HTMLInputElement>("input").disabled = true;
-      addMessage("Connection lost. Getting it back…", "note");
+      // The count is the point. A bare "reconnecting…" that sat there for
+      // minutes was indistinguishable from a frozen app, and the user read it
+      // as one — so show which try this is and how many there are.
+      $("chat-mode").textContent = `reconnecting ${payload.attempt}/${payload.of}…`;
+      setComposerEnabled(false);
+      if (payload.attempt === 1) addMessage("Connection lost. Getting it back…", "note");
       break;
     case "reconnected": {
       const secs = burnSeconds();
       $("chat-mode").textContent = secs > 0 ? `encrypted · vanishing ${secs}s` : "encrypted";
-      $<HTMLInputElement>("input").disabled = false;
+      setComposerEnabled(true);
       addMessage("Back.", "note");
       input.focus();
       break;

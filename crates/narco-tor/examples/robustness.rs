@@ -89,31 +89,70 @@ async fn main() -> Res<()> {
     pair_once(&host_tor, &join_tor, CODE).await?;
     println!("   ok in {:?}\n", t.elapsed());
 
-    // 5. Someone arrives with the wrong secret.
+    // 5. Someone reaches the room without the secret.
     //
-    // The host must reject them without ending, and must still be there for the
-    // person who has the right one — otherwise anyone who learned the address
-    // could deny the room to its owner by connecting once. It should also be
-    // slower each time, which is the guessing limit doing its job.
-    println!("5. a wrong secret is rejected, and the right one still gets in");
+    // The host must turn them away and stay up for the person who does have it.
+    // Otherwise anyone who learned the address could close the room to its owner
+    // by knocking once.
+    //
+    // Getting this scenario to test anything took a correction. It used to hand
+    // the joining side a genuinely different code — but the address is derived
+    // from the secret, so a wrong secret means a *different address*. That peer
+    // dialled a service which does not exist, the host never saw a connection,
+    // and the assertion passed while exercising none of the code it names. It
+    // also took the full thirty-minute dial timeout to do it.
+    //
+    // The case that actually matters is someone holding the address but not the
+    // password, so build exactly that: the right onion seeds, the wrong SPAKE2
+    // password.
+    println!("5. someone with the address but not the secret is turned away");
     let right = narco_proto::derive_multi(&[CODE])?;
-    let wrong = narco_proto::derive_multi(&["TOTALLYWRONGCODE9"])?;
+    let mut impostor = right.clone();
+    impostor.pake_pw = narco_proto::derive_multi(&["TOTALLYWRONGCODE9"])?.pake_pw;
     let t = Instant::now();
     let (rh, rj) = (right.clone(), right.clone());
-    let (host_side, _bad, good) = tokio::join!(
+    let (host_side, bad, good) = tokio::join!(
         host_tor.host(&rh, quiet),
-        // Knocks first with the wrong secret.
-        join_tor.join(&wrong, quiet),
+        // Knocks first, at the right door, with the wrong key.
+        join_tor.join(&impostor, quiet),
         // And the real peer arrives while the host is still waiting.
         async {
             tokio::time::sleep(std::time::Duration::from_secs(8)).await;
             join_tor.join(&rj, quiet).await
         },
     );
-    assert!(host_side.is_ok(), "the host gave up on a wrong secret");
+    assert!(bad.is_err(), "an impostor was let in");
+    assert!(host_side.is_ok(), "the host gave up after one wrong secret");
     assert!(good.is_ok(), "the right secret could not get in afterwards");
     println!(
-        "   wrong secret refused, right one admitted, in {:?}\n",
+        "   impostor refused, owner admitted, in {:?}\n",
+        t.elapsed()
+    );
+
+    // 6. Give up while waiting to be joined, then host the same code again.
+    //
+    // `host` tears its onion service down on the way out, but only if it is
+    // allowed to return. Cancel it — the End button does this, and so does a
+    // reconnect attempt that runs out of time — and the future is dropped
+    // before that line is reached, leaving the service registered with tor and
+    // nothing listening behind it. ADD_ONION then refused the same address for
+    // the rest of the process. From the outside that is "I closed it and now I
+    // can't get back in", which is exactly how it was reported.
+    println!("6. cancelling a host mid-wait, then hosting the same code again");
+    let derived = narco_proto::derive_multi(&[CODE])?;
+    let abandoned = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        host_tor.host(&derived, quiet),
+    )
+    .await;
+    assert!(
+        abandoned.is_err(),
+        "nobody was joining, so this should have hit the timeout"
+    );
+    let t = Instant::now();
+    pair_once(&host_tor, &join_tor, CODE).await?;
+    println!(
+        "   re-hosted after an abandoned attempt in {:?}\n",
         t.elapsed()
     );
 

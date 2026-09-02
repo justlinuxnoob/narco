@@ -54,6 +54,12 @@ const MAX_WRONG_SECRETS: u32 = 5;
 /// Added to the wait after each wrong secret, so guessing gets slower.
 const GUESS_BACKOFF: Duration = Duration::from_secs(2);
 
+/// How many junk connections are answered at full speed before the host starts
+/// pausing between them. Not a limit — a stray must never be able to close the
+/// room — just a brake, so connect-and-hang-up in a loop costs the attacker
+/// more than it costs us.
+const STRAY_PATIENCE: u32 = 20;
+
 /// Cap on a single handshake once a connection exists.
 ///
 /// `MEET_TIMEOUT` bounds only the wait for a connection, not what happens on
@@ -152,6 +158,17 @@ impl TorTransport {
 
         let address = {
             let mut d = self.daemon.lock().await;
+            // Clear any copy of this service left behind by an earlier attempt.
+            //
+            // The teardown at the end of this function only runs if the function
+            // runs to completion. Cancel it — the End button does, and so does a
+            // reconnect that times out — and the service stays registered with
+            // tor while nothing listens behind it. Publishing the same address
+            // again then fails, and keeps failing for the life of the process,
+            // which is what "I closed it and now I can't get back in" looks like
+            // from the inside. ADD_ONION has no replace flag, so remove first;
+            // the error when there was nothing to remove is the normal case.
+            let _ = d.del_onion(&key.address).await;
             d.add_onion(&key.control_blob, VIRTUAL_PORT, local_port)
                 .await
                 .map_err(|e| ConnectError::Tor(TorError::Launch(e.to_string())))?
@@ -160,6 +177,7 @@ impl TorTransport {
         on_status(Status::WaitingForPeer);
         let deadline = tokio::time::Instant::now() + MEET_TIMEOUT;
         let mut wrong_secrets = 0u32;
+        let mut strays = 0u32;
 
         let result = loop {
             let accepted = tokio::time::timeout_at(deadline, listener.accept()).await;
@@ -184,15 +202,28 @@ impl TorTransport {
                     on_status(Status::WaitingForPeer);
                     continue;
                 }
-                // A stray connector, or one that went quiet. Not a guess, so
-                // it does not count against the limit.
-                Ok(Err(ConnectError::Protocol(ProtoError::Reflection)))
-                | Ok(Err(ConnectError::Io(_)))
-                | Err(_) => {
+                // Anything else is a stray: a reflection, a dropped socket,
+                // junk bytes, a connector that went quiet. None of it is a
+                // password guess and none of it may end the meeting.
+                //
+                // Every protocol error that was not a mismatch used to fall
+                // through to `break Err(e)`, so five bytes — a length prefix
+                // and an unknown frame kind — ended the host's entire
+                // thirty-minute window, and the person who actually knew the
+                // secret could then never get in. Anyone who could reach the
+                // address could shut the room with one packet.
+                //
+                // Strays are throttled rather than counted: a peer that
+                // connects and hangs up in a loop should not spin this thread,
+                // but it also must not be able to lock out the real peer.
+                _ => {
+                    strays += 1;
+                    if strays > STRAY_PATIENCE {
+                        tokio::time::sleep(GUESS_BACKOFF).await;
+                    }
                     on_status(Status::WaitingForPeer);
                     continue;
                 }
-                Ok(Err(e)) => break Err(e),
             }
         };
 
@@ -339,6 +370,19 @@ fn is_directory_in_use(e: &DaemonError) -> bool {
 /// the daemon at one killed it on startup — "State file is not a file? Failing"
 /// — on every machine that had ever run an older Narco, and on no other.
 fn app_tor_dir() -> std::path::PathBuf {
+    // Set by the app from Tauri's own per-platform cache directory, and trusted
+    // ahead of anything guessed below.
+    //
+    // Only the Arti transport was reading this — and Arti runs on iOS, while
+    // this daemon is what Android runs. On Android none of the fallbacks lead
+    // anywhere the app may write: `XDG_CACHE_HOME` is unset, `HOME` is `/data`,
+    // and the temp directory belongs to another user. Whether tor could start
+    // at all came down to whether the platform happened to point `TMPDIR`
+    // somewhere useful.
+    if let Some(dir) = std::env::var_os("NARCO_STATE_DIR") {
+        return std::path::PathBuf::from(dir).join("tor-daemon");
+    }
+
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
     } else {

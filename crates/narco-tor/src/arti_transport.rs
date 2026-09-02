@@ -49,6 +49,15 @@ const MAX_WRONG_SECRETS: u32 = 5;
 /// Added to the wait after each wrong secret, so guessing gets slower.
 const GUESS_BACKOFF: Duration = Duration::from_secs(2);
 
+/// How many junk connections are answered at full speed before this side starts
+/// pausing between them. See the same constant in [`crate::transport`].
+const STRAY_PATIENCE: u32 = 20;
+
+/// Cap on a single handshake once a stream exists. See the same constant in
+/// [`crate::transport`]: without it, a peer that connects and then says nothing
+/// waits forever inside `read_exact`.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// Pause between dial attempts while joining. The host may not have published
 /// yet, so early failures are expected rather than fatal.
 const DIAL_RETRY: Duration = Duration::from_secs(4);
@@ -302,6 +311,7 @@ impl TorTransport {
         let mut streams = handle_rend_requests(rend_requests);
         let deadline = tokio::time::Instant::now() + MEET_TIMEOUT;
         let mut wrong_secrets = 0u32;
+        let mut strays = 0u32;
 
         loop {
             let request = match tokio::time::timeout_at(deadline, streams.next()).await {
@@ -314,8 +324,16 @@ impl TorTransport {
                 Err(_) => continue, // failed accept; wait for the next knock
             };
             on_status(Status::PeerFound);
-            match run_handshake(stream, derived).await {
-                Ok(conn) => {
+            // A connector that stalls must not hold the door. `run_handshake`
+            // bottoms out in `read_exact`, which waits forever, so a peer that
+            // opened a stream and then said nothing hung this host for good:
+            // no idle timer is armed yet and the service is never torn down.
+            // The daemon path has been bounded since it was written; this one
+            // was awaited bare.
+            let handshake =
+                tokio::time::timeout(HANDSHAKE_TIMEOUT, run_handshake(stream, derived)).await;
+            match handshake {
+                Ok(Ok(conn)) => {
                     // Paired. Dropping the service tears down the introduction
                     // points, so no further connection can be established — the
                     // "only ever two people" guarantee, enforced in code rather
@@ -325,7 +343,7 @@ impl TorTransport {
                 }
                 // Someone arrived with the wrong secret. Each one is a guess,
                 // so they get slower and then stop.
-                Err(ConnectError::Protocol(ProtoError::ConfirmMismatch)) => {
+                Ok(Err(ConnectError::Protocol(ProtoError::ConfirmMismatch))) => {
                     wrong_secrets += 1;
                     if wrong_secrets >= MAX_WRONG_SECRETS {
                         drop(service);
@@ -335,13 +353,16 @@ impl TorTransport {
                     on_status(Status::WaitingForPeer);
                     continue;
                 }
-                // Not a guess, so it does not count against the limit.
-                Err(ConnectError::Protocol(ProtoError::Reflection)) => {
-                    on_status(Status::WaitingForPeer);
-                    continue;
-                }
-                // Connection dropped mid-handshake; wait for the next.
-                Err(_) => {
+                // Anything else is a stray: a reflection, a dropped stream,
+                // unreadable bytes, a stall. None of it is a guess, and none of
+                // it may end the meeting. Throttled after a while so that
+                // connecting and hanging up in a loop costs the other side
+                // more than it costs us.
+                _ => {
+                    strays += 1;
+                    if strays > STRAY_PATIENCE {
+                        tokio::time::sleep(GUESS_BACKOFF).await;
+                    }
                     on_status(Status::WaitingForPeer);
                     continue;
                 }
@@ -367,15 +388,21 @@ impl TorTransport {
             match self.client.connect((address.as_str(), VIRTUAL_PORT)).await {
                 Ok(stream) => {
                     on_status(Status::PeerFound);
-                    match run_handshake(stream, derived).await {
-                        Ok(conn) => return Ok(conn),
+                    // Bounded for the same reason as the hosting side: a host
+                    // that accepts the stream and then says nothing would
+                    // otherwise hang the joiner forever, past the deadline this
+                    // loop checks at the top.
+                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, run_handshake(stream, derived))
+                        .await
+                    {
+                        Ok(Ok(conn)) => return Ok(conn),
                         // Reached the host but the codes differ — retrying will
                         // not help, so surface it.
-                        Err(ConnectError::Protocol(ProtoError::ConfirmMismatch)) => {
+                        Ok(Err(ConnectError::Protocol(ProtoError::ConfirmMismatch))) => {
                             return Err(ConnectError::Protocol(ProtoError::ConfirmMismatch))
                         }
                         // Transient; wait and try again.
-                        Err(_) => {
+                        _ => {
                             on_status(Status::WaitingForPeer);
                             tokio::time::sleep(DIAL_RETRY).await;
                         }
@@ -450,8 +477,8 @@ mod tests {
     #[test]
     fn host_and_joiner_target_one_shared_address() {
         let d = narco_proto::kdf::derive("PWXK7M2QRT9HFZ").unwrap();
-        let host_sees = identity::identity(&d, Slot::A).address;
-        let join_sees = identity::identity(&d, Slot::A).address;
+        let host_sees = crate::onion::onion_key(&d).address;
+        let join_sees = crate::onion::onion_key(&d).address;
         assert_eq!(host_sees, join_sees);
     }
 
@@ -459,8 +486,14 @@ mod tests {
     fn status_is_comparable_for_ui_dedup() {
         assert_eq!(Status::WaitingForPeer, Status::WaitingForPeer);
         assert_ne!(
-            Status::BootstrappingTor { percent: 1 },
-            Status::BootstrappingTor { percent: 2 }
+            Status::BootstrappingTor {
+                percent: 1,
+                detail: String::new()
+            },
+            Status::BootstrappingTor {
+                percent: 2,
+                detail: String::new()
+            }
         );
     }
 }

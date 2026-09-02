@@ -29,6 +29,16 @@ pub enum Error {
     /// Key confirmation did not match. In practice: the two sides typed
     /// different codes, or the relay tampered with the handshake.
     ConfirmMismatch,
+    /// The peer's handshake message was not a handshake message at all — wrong
+    /// length, wrong side marker, unparseable.
+    ///
+    /// Distinct from [`Error::ConfirmMismatch`] because a host counts wrong
+    /// codes against a guessing limit and gives up once it has seen enough.
+    /// Both used to arrive as `ConfirmMismatch`, so thirty-three bytes of
+    /// nonsense counted as somebody typing the wrong secret — five junk
+    /// connections and the host abandoned the room, telling its owner the codes
+    /// did not match. Rubbish is not a guess.
+    BadHandshake,
 
     /// Message counter was not the expected next value. Over an ordered
     /// transport this means replay or reordering, never packet loss.
@@ -67,6 +77,7 @@ impl fmt::Display for Error {
             UnknownKind(k) => write!(f, "unknown frame kind {k}"),
             Reflection => write!(f, "handshake reflected: the relay is misbehaving"),
             ConfirmMismatch => write!(f, "handshake failed: codes do not match"),
+            BadHandshake => write!(f, "handshake failed: the peer sent something unreadable"),
             OutOfOrder { expected, got } => {
                 write!(f, "out-of-order message (expected {expected}, got {got})")
             }

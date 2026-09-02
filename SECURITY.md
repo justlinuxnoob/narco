@@ -48,9 +48,10 @@ is the honest recommendation.
 
 ## Known weaknesses
 
-Found in an internal review in 0.5.6 and listed here because a security tool
-that keeps its open problems to itself is not worth trusting. Ordered by how
-much they should worry you.
+Found in internal reviews and listed here because a security tool that keeps its
+open problems to itself is not worth trusting. Ordered by how much they should
+worry you. Last revised for 0.10.0, after a three-way audit of the crypto, the
+app, and the Tor transport.
 
 1. **The SPAKE2 library never erases its own state.** `spake2` 0.4.0 has no
    zeroization — not even as an optional feature. Its ephemeral scalar and a
@@ -63,25 +64,44 @@ much they should worry you.
    future session using the same secrets. Fixing this needs a patched or
    replaced PAKE crate; nothing in Narco's own code can reach that memory.
 
-2. **Tor's cache is left on disk, deliberately.** No message, key, or code ever
-   is — but tor keeps its consensus cache and chosen entry guards in a folder
-   Narco owns, which is what makes a second connection fast instead of taking
-   another 40 seconds. It contains nothing of yours, and it is deleted when the
-   daemon shuts down cleanly, but timestamps in it are evidence that this
-   machine ran Narco and roughly when. If that matters to you, delete
-   `~/.cache/narco` (or `%LOCALAPPDATA%\narco`) afterwards.
+2. **The guessing limit cannot stop an offline dictionary attack, and never
+   could.** A host answers at most five wrong secrets and slows down in
+   between, which bounds guessing *against the host*. It does not bound
+   guessing at all, because the onion address and the SPAKE2 password come from
+   the same derivation: an attacker derives a candidate address offline and
+   asks the Tor directory whether it exists. No connection to you, nothing to
+   rate-limit, nothing you could observe. Argon2id at 32 MiB × 3 passes is what
+   actually stands between a weak secret and this attack, which is why the
+   generated code is 14 characters from a 32-symbol alphabet — about 70 bits —
+   and why typing your own is warned about. The limit is worth having against
+   someone who already has the address; it is not what keeps you safe.
 
-3. **The room code is held in ordinary strings.** `code::generate`,
-   `code::normalize`, and the secret list in the app all use `String`, which is
-   not wiped when dropped. The derived key material *is* wiped. Recovering the
-   code from memory is worse than recovering a key, because it reproduces every
-   past and future session for that code.
+3. **Tor's cache stays on disk.** No message, key, or code is ever written —
+   but tor keeps its consensus cache and its chosen entry guards in a folder
+   Narco owns, which is what makes the second connection quick instead of
+   another 40 seconds. It holds nothing of yours, but its timestamps show this
+   machine ran Tor and roughly when, and the guard list shows which relays it
+   used. Until 0.10.0 this section claimed the folder was deleted on a clean
+   shutdown; it was not. The code that deletes it lives in a destructor, and
+   Tauri exits the process without running destructors, so it had never run in
+   a released build. Delete `~/.cache/narco` (or `%LOCALAPPDATA%\narco`)
+   yourself if it matters to you.
 
-4. **A host will answer guesses as fast as they arrive.** SPAKE2 grants one
-   password guess per connection, which is the intended bound — but nothing
-   rate-limits connections, so someone who already knows the onion address gets
-   unlimited attempts for as long as the host waits. Generated codes make this
-   irrelevant; invented ones do not.
+4. **The room code is held in ordinary strings.** `code::generate` and
+   `code::normalize` use `String`, which is not wiped when dropped. The secret
+   list the app receives from the webview is now wiped, and so is every
+   derived value, but the copy serde makes while decoding the message from the
+   webview is out of reach. Recovering the code from memory is worse than
+   recovering a key, because it reproduces every past and future session for
+   that code.
+
+5. **A file in flight exists in several unwiped copies.** Text is handled
+   tightly: one buffer in the session task, one on screen, destroyed together.
+   A file is not. It exists as its pieces, as the joined bytes, as base64
+   across the IPC boundary, and again as bytes and a blob inside the webview.
+   All of it is freed when the session ends and none of it reaches disk unless
+   you save it, but the individual copies are not zeroized, and the ones inside
+   the webview are past the reach of Narco's own code.
 
 ## Design decisions worth reviewing
 

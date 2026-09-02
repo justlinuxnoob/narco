@@ -424,9 +424,15 @@ impl TorDaemon {
         virtual_port: u16,
         local_port: u16,
     ) -> Result<String, DaemonError> {
-        let cmd = format!(
+        // Wrapped, because this string contains the expanded ed25519 secret for
+        // the room's onion identity. `onion.rs` is careful to keep that blob in
+        // a `Zeroizing` for exactly this reason, and a plain `format!` here
+        // would copy it into a `String` that is dropped un-wiped — undoing the
+        // measure at its only consumer, and leaving the key in freed heap (and
+        // in swap) for the rest of the process.
+        let cmd = zeroize::Zeroizing::new(format!(
             "ADD_ONION ED25519-V3:{key_blob} Flags=DiscardPK Port={virtual_port},127.0.0.1:{local_port}\r\n"
-        );
+        ));
         let reply = self.command(&cmd).await?;
         for line in reply.lines() {
             if let Some(id) = line
@@ -663,7 +669,27 @@ async fn read_socks_port(control: &mut TcpStream) -> Result<u16, DaemonError> {
 
 /// Read one control-protocol reply: lines until one starting `NNN ` (space
 /// rather than `-`, which marks continuation).
+/// How long a single control command may take to answer, and how much it may
+/// say.
+///
+/// There was no bound on either. Every control command — authenticating,
+/// reading the SOCKS port, publishing a service — bottomed out in a read with
+/// no deadline, so a tor that accepted the connection and then said nothing
+/// hung the whole launch with none of the surrounding timeouts covering it.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_REPLY: usize = 64 * 1024;
+
 async fn read_reply(control: &mut TcpStream) -> Result<String, DaemonError> {
+    tokio::time::timeout(REPLY_TIMEOUT, read_reply_inner(control))
+        .await
+        .unwrap_or_else(|_| {
+            Err(DaemonError::Control(
+                "tor stopped answering on its control port".into(),
+            ))
+        })
+}
+
+async fn read_reply_inner(control: &mut TcpStream) -> Result<String, DaemonError> {
     use tokio::io::AsyncReadExt;
     let mut out = String::new();
     let mut byte = [0u8; 1];
@@ -672,6 +698,11 @@ async fn read_reply(control: &mut TcpStream) -> Result<String, DaemonError> {
         let n = control.read(&mut byte).await?;
         if n == 0 {
             return Err(DaemonError::Control("control connection closed".into()));
+        }
+        if out.len() + line.len() > MAX_REPLY {
+            return Err(DaemonError::Control(
+                "tor's reply on the control port ran on too long".into(),
+            ));
         }
         let c = byte[0] as char;
         if c == '\n' {

@@ -2,8 +2,15 @@
 //!
 //! Everything security-relevant lives in `narco-proto` and `narco-tor`. This
 //! layer only owns the session task and shuttles plaintext between it and the
-//! webview. Plaintext exists in exactly two places — the running session task
-//! and the on-screen message list — and both are destroyed together.
+//! webview.
+//!
+//! Plaintext lives in the running session task and in the on-screen message
+//! list, and both are destroyed together. A file in transit is the exception:
+//! it exists at once as its pieces here, as the joined bytes, as base64 across
+//! the IPC boundary, and again as bytes and a blob inside the webview. Those
+//! copies are freed when the session ends but are not individually wiped, and
+//! the webview's are past the reach of this crate. Text is the tight case;
+//! files are the loose one.
 
 use base64::Engine as _;
 use narco_proto::{message, Error as ProtoError, Event};
@@ -18,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
+use zeroize::Zeroizing;
 
 /// Commands from the UI to the running session task.
 enum Cmd {
@@ -61,7 +69,10 @@ enum UiEvent {
     Ended { reason: String },
     /// The connection dropped and is being re-established. The conversation is
     /// not over and the message history stays on screen.
-    Reconnecting,
+    ///
+    /// Carries which try this is, so a screen that says "reconnecting" for
+    /// minutes visibly counts instead of looking frozen.
+    Reconnecting { attempt: u32, of: u32 },
     /// Back. A fresh handshake completed at the same address.
     Reconnected,
     /// The idle timeout is about to fire, or has been called off because
@@ -162,7 +173,9 @@ fn emit(app: &AppHandle, e: UiEvent) {
             if *active { "shown" } else { "cleared" }
         )),
         UiEvent::Ready => Some("[narco] handshake confirmed — chat live".to_string()),
-        UiEvent::Reconnecting => Some("[narco] connection lost — reconnecting".to_string()),
+        UiEvent::Reconnecting { attempt, of } => {
+            Some(format!("[narco] connection lost — reconnecting {attempt}/{of}"))
+        }
         UiEvent::Reconnected => Some("[narco] reconnected".to_string()),
         UiEvent::Ended { reason } => Some(format!("[narco] ended: {reason}")),
         UiEvent::TorProgress {
@@ -174,16 +187,24 @@ fn emit(app: &AppHandle, e: UiEvent) {
         )),
         UiEvent::Message { .. } => None, // never log message events
         UiEvent::File { .. } => None,    // nor file contents
-        // Only that a transfer is happening, never the name or the bytes.
+        // Only that a transfer is happening, never the name or the bytes — and
+        // only its first and last piece.
+        //
+        // This fired once per chunk into a 500-line ring. A 60 MB file is about
+        // 2,000 pieces, so one transfer flushed every real diagnostic out of the
+        // panel the user is told to paste when something goes wrong, including
+        // the Tor bootstrap trail it exists to show. A peer could do the same
+        // deliberately with empty chunks.
         UiEvent::FileProgress {
             sent,
             total,
             outgoing,
             ..
-        } => Some(format!(
+        } if *sent == 1 || sent == total => Some(format!(
             "[narco] file {} {sent}/{total}",
             if *outgoing { "sending" } else { "receiving" }
         )),
+        UiEvent::FileProgress { .. } => None,
     };
     if let Some(line) = line {
         eprintln!("{line}");
@@ -311,13 +332,28 @@ async fn connect(
     host: bool,
     nickname: String,
 ) -> Result<(), String> {
+    // Take ownership of the strings so they are wiped when this returns.
+    //
+    // `derive_multi` already zeroizes its own normalized copies, but the ones
+    // it was handed were left in the heap for the life of the process. These
+    // are the room secrets in the clear, which is worse to leak than any key
+    // derived from them: a key opens one session, the secret reproduces every
+    // session anyone ever holds at that address. Moving each `String` into
+    // `Zeroizing` keeps the same allocation and wipes it on drop.
+    //
+    // The copy serde made while decoding the IPC message is still out of
+    // reach. This closes what the app itself holds, not the webview boundary.
+    let secrets: Vec<Zeroizing<String>> = secrets.into_iter().map(Zeroizing::new).collect();
+
     // Validate before doing anything slow.
     let derived = narco_proto::derive_multi(&secrets).map_err(|e| e.to_string())?;
 
     let (tx, rx) = mpsc::channel::<Cmd>(16);
     // Kept so the cleanup below can tell whether the slot still holds *this*
-    // session's sender.
-    let mine = tx.clone();
+    // session's sender. Weak on purpose: a strong clone here would keep the
+    // channel open for the life of the task, and `end_session` relies on
+    // dropping the last sender to close it.
+    let mine = tx.downgrade();
     {
         let mut slot = state.tx.lock().expect("state poisoned");
         if slot.is_some() {
@@ -350,7 +386,10 @@ async fn connect(
         // could stop.
         if let Some(state) = app.try_state::<AppState>() {
             let mut slot = state.tx.lock().expect("state poisoned");
-            if slot.as_ref().is_some_and(|s| s.same_channel(&mine)) {
+            if slot
+                .as_ref()
+                .is_some_and(|s| mine.upgrade().is_some_and(|m| s.same_channel(&m)))
+            {
                 *slot = None;
             }
         }
@@ -360,12 +399,72 @@ async fn connect(
     Ok(())
 }
 
-/// How many times a dropped connection is chased before giving up. Generous:
-/// a phone that spent a while in the background may need several.
-const MAX_RECONNECTS: u32 = 20;
+/// How many times a dropped connection is chased before giving up.
+const MAX_RECONNECTS: u32 = 6;
+
+/// How long one reconnect attempt waits for the other person.
+///
+/// First contact waits half an hour inside the transport, because two people
+/// press Host and Join minutes apart and waiting is the entire job of that
+/// screen. A reconnect is a different situation: they were talking a second
+/// ago, so either the peer is still there and answers as soon as Tor has a
+/// circuit, or they have closed the app and no amount of waiting will produce
+/// them.
+///
+/// Reconnects used to inherit that half-hour, twenty times over. Nobody ever
+/// saw the end of it: the surviving side sat on "reconnecting…" for ten hours
+/// after the other person simply quit. Six tries of fifty seconds is five
+/// minutes, which covers a phone that was backgrounded, and then it stops and
+/// says so.
+const RECONNECT_ATTEMPT: Duration = Duration::from_secs(50);
 
 /// How long before the idle timeout the user is warned.
 const IDLE_WARNING: Duration = Duration::from_secs(60);
+
+/// How many file transfers may be part-received at once.
+///
+/// An honest peer sends one file at a time and waits for it to finish. The
+/// transfer id is chosen by the sender, so without a cap a peer could open a
+/// new one with every chunk and never complete any of them.
+const MAX_OPEN_TRANSFERS: usize = 4;
+
+/// A file being reassembled from pieces.
+struct Transfer {
+    /// Taken from the first piece seen, and used for every mention of this
+    /// transfer afterwards.
+    name: String,
+    /// `None` until that piece arrives. An empty piece is still a piece, which
+    /// is why this is not just an empty `Vec`.
+    parts: Vec<Option<Vec<u8>>>,
+    have: u32,
+}
+
+impl Transfer {
+    fn new(name: String, total: u32) -> Self {
+        Transfer {
+            name,
+            // Bounded by `message::MAX_CHUNKS`, which the decoder enforces
+            // before this is ever reached.
+            parts: vec![None; total as usize],
+            have: 0,
+        }
+    }
+}
+
+/// What to tell someone whose peer never came back.
+///
+/// Naming the button matters. Both sides wiped their screen when the session
+/// ended, and the two roles are not interchangeable — the host publishes and
+/// the joiner dials, so if both people guess "Host" they will sit there
+/// publishing at each other and never meet. Each side is told the role it
+/// already had.
+fn gave_up(host: bool) -> String {
+    format!(
+        "Could not reach them again — they have probably closed the app. \
+         To pick this back up, both of you enter the same secret and you press {}.",
+        if host { "Host" } else { "Join" }
+    )
+}
 
 /// Owns the session and its stream for the whole conversation.
 ///
@@ -420,10 +519,18 @@ async fn run_session(
         // killed. Meanwhile the front end had already claimed "You cancelled."
         let connected = tokio::select! {
             result = async {
-                if host {
-                    transport.host(&derived, cb).await
+                let meet = async {
+                    if host {
+                        transport.host(&derived, cb).await
+                    } else {
+                        transport.join(&derived, cb).await
+                    }
+                };
+                // `None` means this reconnect attempt ran out of time.
+                if reconnects == 0 {
+                    Some(meet.await)
                 } else {
-                    transport.join(&derived, cb).await
+                    tokio::time::timeout(RECONNECT_ATTEMPT, meet).await.ok()
                 }
             } => result,
 
@@ -442,18 +549,24 @@ async fn run_session(
             mut session,
             stream,
         } = match connected {
-            Ok(c) => c,
-            Err(e) => {
-                // Failing to connect at all is the user's problem to see. Failing
-                // to get back is worth another try, since they were talking a
-                // moment ago.
-                if reconnects == 0 {
-                    break 'connection e.to_string();
-                }
+            Some(Ok(c)) => c,
+            // Failing to connect at all is the user's problem to see. Failing to
+            // get back is worth another try, since they were talking a moment
+            // ago.
+            Some(Err(e)) if reconnects == 0 => break 'connection e.to_string(),
+            // Failed, or ran out of time. Either way the peer is not back yet.
+            _ => {
                 reconnects += 1;
                 if reconnects > MAX_RECONNECTS {
-                    break 'connection "Lost the connection and could not get it back.".into();
+                    break 'connection gave_up(host);
                 }
+                emit(
+                    app,
+                    UiEvent::Reconnecting {
+                        attempt: reconnects,
+                        of: MAX_RECONNECTS,
+                    },
+                );
                 continue 'connection;
             }
         };
@@ -462,6 +575,10 @@ async fn run_session(
             emit(app, UiEvent::Ready);
         } else {
             emit(app, UiEvent::Reconnected);
+            // Spend the budget per outage, not per conversation. The counter
+            // never reset, so a long and otherwise healthy chat died for good on
+            // its seventh brief blip — however many hours apart those blips were.
+            reconnects = 0;
         }
 
         let (mut reader, mut writer) = tokio::io::split(stream);
@@ -492,10 +609,13 @@ async fn run_session(
         // Cleared on any traffic, so a warning shown once does not stay on screen
         // after the conversation resumes.
         let mut idle_warned = false;
+        // When silence will end the session. Pushed forward by traffic, never by
+        // the loop merely going round again.
+        let mut idle_at = tokio::time::Instant::now() + idle;
 
         // Pieces of files still arriving, keyed by transfer. Memory only, and gone
         // with the session like everything else.
-        let mut incoming_files: std::collections::HashMap<u64, (String, Vec<Vec<u8>>)> =
+        let mut incoming_files: std::collections::HashMap<u64, Transfer> =
             std::collections::HashMap::new();
         let mut next_transfer_id: u64 = 0;
 
@@ -506,6 +626,7 @@ async fn run_session(
                     let Some(frame) = frame else {
                         break 'session ("The other person disconnected.".to_string(), true);
                     };
+                    idle_at = tokio::time::Instant::now() + idle;
                     if idle_warned {
                         idle_warned = false;
                         emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
@@ -522,24 +643,56 @@ async fn run_session(
                                 // transfer that is abandoned halfway is dropped
                                 // when the session ends, along with everything
                                 // else.
+                                //
+                                // How many transfers may be open at once is
+                                // capped. Nothing used to evict a transfer that
+                                // never finished, and the peer picks the id, so
+                                // a stream of chunks with a fresh id each time
+                                // pinned memory permanently until the process
+                                // was killed — taking the session keys, unwiped,
+                                // with it.
+                                if !incoming_files.contains_key(&id)
+                                    && incoming_files.len() >= MAX_OPEN_TRANSFERS
+                                {
+                                    // Ignore rather than end the session: an
+                                    // honest peer sends one file at a time, so
+                                    // reaching this means something is wrong on
+                                    // their side, not on ours.
+                                    continue;
+                                }
                                 let entry = incoming_files
                                     .entry(id)
-                                    .or_insert_with(|| (name.clone(), vec![Vec::new(); total as usize]));
-                                if entry.1.len() == total as usize {
-                                    entry.1[index as usize] = data;
-                                    let have = entry.1.iter().filter(|c| !c.is_empty()).count() as u32;
+                                    .or_insert_with(|| Transfer::new(name, total));
+                                if entry.parts.len() == total as usize {
+                                    if entry.parts[index as usize].is_none() {
+                                        entry.have += 1;
+                                    }
+                                    // Counting non-empty pieces meant a
+                                    // zero-length one never counted, so a single
+                                    // empty chunk left a transfer that could
+                                    // never complete and never be freed.
+                                    entry.parts[index as usize] = Some(data);
                                     emit(app, UiEvent::FileProgress {
-                                        name: name.clone(),
-                                        sent: have,
+                                        // The transfer's name, not this chunk's.
+                                        // They are separate fields and a peer
+                                        // could make them disagree, showing one
+                                        // name throughout and delivering another.
+                                        name: entry.name.clone(),
+                                        sent: entry.have,
                                         total,
                                         outgoing: false,
                                     });
-                                    if have == total {
-                                        let (name, parts) = incoming_files.remove(&id).expect("just seen");
-                                        let bytes: Vec<u8> = parts.concat();
+                                    if entry.have == total {
+                                        let done = incoming_files.remove(&id).expect("just seen");
+                                        let bytes: Vec<u8> = done
+                                            .parts
+                                            .into_iter()
+                                            .flatten()
+                                            .collect::<Vec<_>>()
+                                            .concat();
                                         emit(app, UiEvent::File {
                                             from,
-                                            name,
+                                            name: done.name,
                                             data: B64.encode(&bytes),
                                         });
                                     }
@@ -567,6 +720,7 @@ async fn run_session(
                 cmd = rx.recv() => {
                     match cmd {
                         Some(Cmd::Send(text)) => {
+                            idle_at = tokio::time::Instant::now() + idle;
                             if idle_warned {
                                 idle_warned = false;
                                 emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
@@ -590,6 +744,7 @@ async fn run_session(
                             }
                         }
                         Some(Cmd::SendFile { name, data }) => {
+                            idle_at = tokio::time::Instant::now() + idle;
                             // Each piece is an ordinary encrypted message, so a
                             // file gets exactly the protection everything else in
                             // the room gets, and the transport never learns it is
@@ -598,6 +753,7 @@ async fn run_session(
                             let id = next_transfer_id;
                             next_transfer_id = next_transfer_id.wrapping_add(1);
                             let mut failed = false;
+                            let mut cancelled = false;
                             for (i, part) in data.chunks(message::CHUNK).enumerate() {
                                 let msg = message::encode_file_chunk(
                                     &nickname, id, i as u32, total, &name, part,
@@ -620,6 +776,23 @@ async fn run_session(
                                     total,
                                     outgoing: true,
                                 });
+                                // Stay interruptible between pieces.
+                                //
+                                // This loop holds the whole `select!` while it
+                                // runs, and a large file over a Tor circuit runs
+                                // for a long time. Nothing else was polled: the
+                                // peer's messages went unread, the idle timers
+                                // did not tick, and — worst — End sat unread in
+                                // the channel, so the one button that stops
+                                // everything looked broken for the length of the
+                                // transfer.
+                                if let Ok(Cmd::End) = rx.try_recv() {
+                                    cancelled = true;
+                                    break;
+                                }
+                            }
+                            if cancelled {
+                                break 'session ("You ended the session.".to_string(), false);
                             }
                             if failed {
                                 break 'session ("The other person disconnected.".to_string(), true);
@@ -631,16 +804,23 @@ async fn run_session(
                 }
 
                 // Idle reaper, in two stages. The first pass warns and the second
-                // ends it, so silence never closes a chat without notice. Any
-                // traffic resets both, because the whole select! restarts.
-                _ = tokio::time::sleep(idle.saturating_sub(IDLE_WARNING)) , if !idle_warned => {
+                // ends it, so silence never closes a chat without notice.
+                //
+                // Both arms sleep until a fixed instant rather than for a
+                // duration. `select!` builds its futures afresh on every pass,
+                // so a `sleep(idle)` restarted from zero each time round the
+                // loop — including the pass where the warning had just fired.
+                // A five-minute setting warned at four minutes and then ended
+                // the session at nine, nearly twice what the user asked for.
+                // `idle_at` moves only when there is actual traffic.
+                _ = tokio::time::sleep_until(idle_at - IDLE_WARNING.min(idle)), if !idle_warned => {
                     idle_warned = true;
                     emit(app, UiEvent::IdleWarning {
-                        seconds_left: IDLE_WARNING.as_secs() as u32,
+                        seconds_left: IDLE_WARNING.min(idle).as_secs() as u32,
                         active: true,
                     });
                 }
-                _ = tokio::time::sleep(idle) => {
+                _ = tokio::time::sleep_until(idle_at) => {
                     break 'session (
                         format!(
                             "Session ended after {} minutes of silence.",
@@ -663,9 +843,15 @@ async fn run_session(
         }
         reconnects += 1;
         if reconnects > MAX_RECONNECTS {
-            break 'connection why;
+            break 'connection gave_up(host);
         }
-        emit(app, UiEvent::Reconnecting);
+        emit(
+            app,
+            UiEvent::Reconnecting {
+                attempt: reconnects,
+                of: MAX_RECONNECTS,
+            },
+        );
         // `session` drops here; Drop zeroizes every key. The next pass derives
         // fresh ones from the secrets we still hold.
     };
@@ -697,9 +883,24 @@ fn send_file(state: State<'_, AppState>, name: String, data: String) -> Result<(
 
 #[tauri::command]
 fn end_session(state: State<'_, AppState>) {
-    if let Some(tx) = state.tx.lock().expect("state poisoned").take() {
+    let mut slot = state.tx.lock().expect("state poisoned");
+    if let Some(tx) = slot.as_ref() {
+        // Best effort: wakes the session at once when the channel has room.
         let _ = tx.try_send(Cmd::End);
     }
+    // This is what actually guarantees it stops. Dropping the last sender
+    // closes the channel, and both the chat loop and the still-connecting loop
+    // treat a closed channel as the end.
+    //
+    // The order used to be the other way round — `take()` the sender, then
+    // `try_send` on it and discard the failure. The channel holds sixteen and
+    // fills whenever the session task is busy, most reliably while a file is
+    // going out over a slow circuit. So End was thrown away, the slot was
+    // already empty, and every later press did nothing at all: the session
+    // stayed live with a published onion service, and the screen never left the
+    // chat. The one control the whole app rests on could fail silently and
+    // could not be retried.
+    slot.take();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

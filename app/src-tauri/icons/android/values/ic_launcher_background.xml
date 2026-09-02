@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-  <color name="ic_launcher_background">#fff</color>
+  <!-- The foreground layer is the bare white mark on transparency, so this is
+       the tile the launcher masks into its own shape. It used to be white,
+       which was invisible under a foreground that was itself an opaque black
+       square. -->
+  <color name="ic_launcher_background">#000000</color>
 </resources>

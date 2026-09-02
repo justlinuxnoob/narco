@@ -3256,7 +3256,7 @@ dependencies = [
 
 [[package]]
 name = "narco-app"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "base64 0.23.1",
  "futures",
@@ -3268,6 +3268,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
