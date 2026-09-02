@@ -17,17 +17,29 @@ fn main() {
         return;
     }
 
-    // Loud, not a warning. Without it the build dies much later as an
-    // undefined `_tor_run_main` from the linker, which does not say whether the
-    // variable never arrived or the flags were wrong — and that difference is
-    // the whole diagnosis.
-    let dir = std::env::var("NARCO_TOR_XCFRAMEWORK").unwrap_or_else(|_| {
+    // The environment variable is a convenience, not the mechanism. Xcode
+    // sanitises the environment it gives a build phase, so a variable exported
+    // by the workflow reaches a direct `cargo build` and never reaches the
+    // cargo that Xcode itself runs — which is exactly how the device build
+    // linked fine while the simulator build could not see it at all.
+    //
+    // So the default is a path, not a variable: CI unpacks the xcframework at
+    // the repository root, and that is reachable from this manifest no matter
+    // who invoked cargo.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this");
+    let vendored = std::path::Path::new(&manifest)
+        .join("../../vendor/tor.xcframework")
+        .to_string_lossy()
+        .into_owned();
+    let dir = std::env::var("NARCO_TOR_XCFRAMEWORK").unwrap_or(vendored);
+
+    if !std::path::Path::new(&dir).exists() {
         panic!(
-            "NARCO_TOR_XCFRAMEWORK is not set. iOS links the C tor from the \
-             tor.xcframework; the workflow sets this per target. Use \
+            "no tor.xcframework at {dir}. iOS links the C tor from it; CI \
+             unpacks it into vendor/ at the repository root. Use \
              `--features check-embedded` for a check-only build off iOS."
-        )
-    });
+        );
+    }
 
     // Pick the slice from the target rather than having the workflow set a
     // different value per step. That plumbing did not survive the trip through
