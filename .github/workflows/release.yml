@@ -205,6 +205,12 @@ jobs:
             | Windows, simplest | `_installer.exe` — install and launch from the Start menu |
             | Windows, no install | `_portable.zip` — unzip, run `Narco.exe` |
             | Linux (any distro) | `_linux_portable.tar.gz` — extract, run `./narco` |
+            | Android | `_android.apk` — sideload it |
+
+            The Android build is new and the least tested of the four. It is
+            signed with a throwaway key, so uninstall any previous version
+            before installing a new one — Android will not upgrade across
+            signing keys.
 
             The portable builds keep the executable and the `tor` folder
             together — the app runs that Tor daemon itself. The installer
