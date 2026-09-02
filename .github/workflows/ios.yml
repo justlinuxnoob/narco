@@ -164,6 +164,13 @@ jobs:
           # provisioning happens before it, so the certificate and profile are
           # on the machine afterwards. Then let the Tauri CLI build normally and
           # find them.
+          # Removed along with the block this replaced, which is what produced
+          # "auth[@]: unbound variable".
+          auth=(-allowProvisioningUpdates
+                -authenticationKeyPath "$key"
+                -authenticationKeyID "$ASC_KEY_ID"
+                -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+
           echo "--- priming signing assets ---"
           xcodebuild "${auth[@]}" \
             -workspace "app/src-tauri/gen/apple/narco-app.xcodeproj/project.xcworkspace" \
