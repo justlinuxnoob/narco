@@ -35,12 +35,23 @@ use tor_rtcompat::PreferredRuntime;
 /// space, so the value is arbitrary and never appears on the real network.
 const VIRTUAL_PORT: u16 = 9001;
 
+/// Give up on bootstrap rather than hang forever on a hostile network.
+const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Give up if the other person never shows. Deliberately long — the two people
+/// may press Start and Join minutes apart — and the user can cancel any time.
+const MEET_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Pause between dial attempts while joining. The host may not have published
+/// yet, so early failures are expected rather than fatal.
+const DIAL_RETRY: Duration = Duration::from_secs(4);
+
 /// Ever-increasing so each onion service launch gets a unique nickname within
 /// the process. See the launch site for why reuse is a bug.
 static LAUNCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How to reach Tor through obfs4 bridges on a censored network.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TorTransport {
     client: Arc<TorClient<PreferredRuntime>>,
 }
