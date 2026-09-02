@@ -550,6 +550,19 @@ pub fn run() {
                 push_log(&format!("[narco] bundled tor dir: {}", tor_dir.display()));
                 std::env::set_var("NARCO_TOR_DIR", tor_dir);
             }
+
+            // Where Tor may keep its own cache and state. Guessing this from
+            // HOME works on desktop and fails on iOS, where the app bundle is
+            // read-only and Tor's own default lands inside it — the 0.6.1 iOS
+            // build could start Arti and then not write a byte. Tauri already
+            // knows the right per-platform directory, so it says so rather than
+            // leaving the transport to infer it.
+            if let Ok(dir) = app.path().app_cache_dir() {
+                let state = dir.join("tor");
+                let _ = std::fs::create_dir_all(&state);
+                push_log(&format!("[narco] tor state dir: {}", state.display()));
+                std::env::set_var("NARCO_STATE_DIR", state);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

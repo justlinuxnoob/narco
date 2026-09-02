@@ -380,6 +380,16 @@ impl TorTransport {
 /// wipe-and-retry in [`TorTransport::bootstrap`] safe. Holds only Tor's public
 /// directory data — never a room code, key, or message.
 fn app_tor_dir() -> Option<std::path::PathBuf> {
+    // Set by the app from Tauri's own per-platform cache directory. Preferred
+    // over anything inferred here, because on iOS there is nothing to infer
+    // from: HOME does not lead anywhere writable, and returning None hands the
+    // choice to Arti, whose default is inside the read-only app bundle. That
+    // is exactly how the first iOS build managed to start Tor and then fail on
+    // "could not read/write persistent state".
+    if let Some(dir) = std::env::var_os("NARCO_STATE_DIR") {
+        return Some(std::path::PathBuf::from(dir));
+    }
+
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
     } else {
@@ -389,7 +399,14 @@ fn app_tor_dir() -> Option<std::path::PathBuf> {
                 std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache"))
             })
     };
-    base.map(|b| b.join("narco").join("tor"))
+    // Never None. The daemon transport has always fallen back to the temp
+    // directory here; this one did not, and that difference is why the same
+    // code path worked on Android and not on iOS.
+    Some(
+        base.unwrap_or_else(std::env::temp_dir)
+            .join("narco")
+            .join("tor"),
+    )
 }
 
 /// Select the rustls crypto backend, once per process.
