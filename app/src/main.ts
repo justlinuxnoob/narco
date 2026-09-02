@@ -268,8 +268,7 @@ async function start(host: boolean) {
 
   const idleSecs = Number($<HTMLSelectElement>("idle").value);
   try {
-    const nickname = $<HTMLInputElement>("nickname").value.trim().replace(/\0/g, "");
-    await invoke("connect", { secrets, idleSecs, host, nickname });
+    await invoke("connect", { secrets, idleSecs, host, nickname: "" });
   } catch (e) {
     endWith(String(e));
   }
@@ -317,6 +316,9 @@ const burnTimers: number[] = [];
 
 /** Ticks the idle countdown while it is on screen. */
 let idleCountdown: number | undefined;
+
+/** Object URLs for received files, revoked when the conversation is wiped. */
+const blobUrls: string[] = [];
 
 const burnSeconds = () => Number($<HTMLSelectElement>("burn").value);
 
@@ -386,6 +388,24 @@ fileInput.addEventListener("change", async () => {
   }
 });
 
+/** Turn the base64 an event carried into bytes the page can hold. */
+function bytesFrom(b64: string): ArrayBuffer {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out.buffer;
+}
+
+const IMAGE_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  avif: "image/avif",
+  bmp: "image/bmp",
+};
+
 /** An image is shown; anything else is offered as a download. */
 function addFile(name: string, dataB64: string, who: "me" | "them", from = "") {
   const li = document.createElement("li");
@@ -396,22 +416,32 @@ function addFile(name: string, dataB64: string, who: "me" | "them", from = "") {
     tag.textContent = from;
     li.append(tag);
   }
-  const looksLikeImage = /\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(name);
-  // A data URL, so the bytes stay in this page and are written to disk only
-  // if the user saves them somewhere themselves.
-  const href = `data:application/octet-stream;base64,${dataB64}`;
-  if (looksLikeImage) {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  const imageType = IMAGE_TYPES[ext];
+
+  // A blob URL, not a data URL. The bytes still live only in this page and
+  // reach the disk only if the person saves them — but a multi-megabyte photo
+  // as a base64 data URL is slow and runs into length limits, and `data:` was
+  // blocked outright by the page's own content policy.
+  const blob = new Blob([bytesFrom(dataB64)], {
+    type: imageType ?? "application/octet-stream",
+  });
+  const url = URL.createObjectURL(blob);
+  // Released when the conversation is wiped, so the bytes do not outlive it.
+  blobUrls.push(url);
+
+  if (imageType) {
     const img = document.createElement("img");
     img.className = "photo";
     img.alt = name;
-    img.src = `data:image/*;base64,${dataB64}`;
+    img.src = url;
     li.append(img);
   }
   const a = document.createElement("a");
-  a.href = href;
+  a.href = url;
   a.download = name;
   a.className = "file";
-  a.textContent = looksLikeImage ? `save ${name}` : name;
+  a.textContent = imageType ? `save ${name}` : name;
   li.append(a);
   messages.append(li);
   messages.scrollTop = messages.scrollHeight;
@@ -429,6 +459,9 @@ function endWith(reason: string) {
   for (const t of burnTimers.splice(0)) clearTimeout(t);
   // Destroy every trace of the conversation in the UI. Rust has already
   // zeroized the keys.
+  // Revoke before clearing: the bytes a blob URL points at stay alive as long
+  // as the URL does, so dropping the elements alone would leave them behind.
+  for (const u of blobUrls.splice(0)) URL.revokeObjectURL(u);
   messages.replaceChildren();
   input.value = "";
   // The share box holds the host's secrets in full. It was never cleared, so

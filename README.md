@@ -60,7 +60,8 @@ Arch and derivatives can build a package from [`packaging/PKGBUILD`](packaging/P
 - **Photos and files.** Sent as ordinary encrypted messages, cut into pieces
   because one message holds 32 KiB. A photo appears in the conversation;
   anything else is offered as a download. Received files stay in memory and
-  reach your disk only if you save them.
+  reach your disk only if you save them, and are released when the session
+  ends.
 - **Nothing on disk.** No database, no history, no logs. Messages live in memory
   and die with the session.
 - **Forward secrecy.** Each message's key is destroyed right after use. Someone
