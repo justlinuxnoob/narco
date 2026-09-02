@@ -82,19 +82,40 @@ fn plain(path: PathBuf) -> PathBuf {
 #[cfg(target_os = "android")]
 fn native_library_dir() -> Option<PathBuf> {
     let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    let mut apk: Option<PathBuf> = None;
+
     for line in maps.lines() {
         // A mapping backed by a file ends with its absolute path.
         let Some(start) = line.find(" /") else {
             continue;
         };
         let path = Path::new(line[start + 1..].trim_end());
-        let is_lib = path.extension().is_some_and(|e| e == "so")
-            && path.components().any(|c| c.as_os_str() == "lib");
-        if is_lib && path.starts_with("/data") {
+        if !path.starts_with("/data") {
+            continue;
+        }
+        if path.extension().is_some_and(|e| e == "so")
+            && path.components().any(|c| c.as_os_str() == "lib")
+        {
             return path.parent().map(Path::to_path_buf);
         }
+        // Remember it in case no extracted library turns up.
+        if path.extension().is_some_and(|e| e == "apk") && apk.is_none() {
+            apk = Some(path.to_path_buf());
+        }
     }
-    None
+
+    // Nothing was mapped from a real file, which means the libraries are being
+    // read straight out of the APK — the default since Android 6. The manifest
+    // asks for extraction precisely so this does not happen, because a library
+    // that was never unpacked cannot be executed. If we end up here anyway, the
+    // extracted directory is still a sibling of the APK, so look there before
+    // giving up.
+    let lib = apk?.parent()?.join("lib");
+    std::fs::read_dir(&lib)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
 }
 
 /// Locate the `tor` executable.

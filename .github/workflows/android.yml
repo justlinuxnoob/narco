@@ -78,6 +78,42 @@ jobs:
         working-directory: app
         run: npm run tauri android init
 
+      # Android stopped unpacking native libraries by default in Android 6: they
+      # are mapped straight out of the APK instead. That is fine for something
+      # you dlopen and fatal for something you exec — an unextracted library is
+      # not a file, so there is nothing to run and nothing in /proc/self/maps
+      # pointing at a directory to run it from. The 0.5.7 APK installed and then
+      # reported it could not find its own daemon for exactly this reason.
+      #
+      # Both switches are needed: the manifest attribute is what older Android
+      # reads, and useLegacyPackaging is what AGP 8 uses to decide whether to
+      # compress them in the first place.
+      - name: Make Android unpack the native libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          MANIFEST=app/src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          GRADLE=app/src-tauri/gen/android/app/build.gradle.kts
+          python3 - "$MANIFEST" "$GRADLE" <<'PY'
+          import re, sys
+          manifest, gradle = sys.argv[1], sys.argv[2]
+
+          s = open(manifest).read()
+          if 'extractNativeLibs' not in s:
+              s = s.replace('<application', '<application android:extractNativeLibs="true"', 1)
+              open(manifest, 'w').write(s)
+          assert 'extractNativeLibs="true"' in open(manifest).read(), "manifest not patched"
+
+          g = open(gradle).read()
+          if 'useLegacyPackaging' not in g:
+              g = re.sub(r'(?m)^android\s*\{',
+                         'android {\n    packaging { jniLibs { useLegacyPackaging = true } }',
+                         g, count=1)
+              open(gradle, 'w').write(g)
+          assert 'useLegacyPackaging' in open(gradle).read(), "gradle not patched"
+          print("native libraries will be unpacked on install")
+          PY
+
       # Android will not execute a file outside the app's native library
       # directory. Tor ships its daemon as libTor.so for exactly this reason, so
       # it installs as a native library and is executable where it lands.
