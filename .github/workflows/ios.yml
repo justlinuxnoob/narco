@@ -62,6 +62,17 @@ jobs:
       - name: Does the Tor engine build for iOS?
         run: cargo build --manifest-path crates/narco-tor/Cargo.toml --target aarch64-apple-ios
 
+      # tauri.conf.json declares resources: ["tor/*"] so the desktop builds
+      # carry the daemon, and a glob matching nothing is a hard error. iOS
+      # ships no daemon — Arti is compiled into the binary — so that directory
+      # does not exist. tauri.ios.conf.json clears the list; this placeholder
+      # satisfies the glob even if the platform config is not picked up.
+      - name: Placate the desktop resource glob
+        run: |
+          mkdir -p app/src-tauri/tor
+          echo "iOS links Arti instead of shipping a daemon; see ios.yml." \
+            > app/src-tauri/tor/README.txt
+
       - name: Initialise the iOS project
         working-directory: app
         run: npm run tauri ios init
