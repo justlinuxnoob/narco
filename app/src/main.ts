@@ -381,8 +381,13 @@ fileInput.addEventListener("change", async () => {
   for (let i = 0; i < bytes.length; i += 0x8000) {
     binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   }
+  const b64 = btoa(binary);
   try {
-    await invoke("send_file", { name: file.name, data: btoa(binary) });
+    await invoke("send_file", { name: file.name, data: b64 });
+    // Show it on this side too. Text does this the moment it is sent; a file
+    // only ever appeared for the person receiving it, so the sender watched a
+    // progress line and then saw nothing at all.
+    addFile(file.name, b64, "me");
   } catch (e) {
     addMessage(String(e), "note");
   }
