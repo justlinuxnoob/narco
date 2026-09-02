@@ -33,6 +33,10 @@ body {
   height: 100%;
   padding: 28px 22px calc(22px + env(safe-area-inset-bottom));
   gap: 14px;
+  /* A phone with the keyboard up, several secrets and the settings open runs
+     out of room quickly, and the body is `overflow: hidden` — without this the
+     buttons end up below the fold with no way to reach them. */
+  overflow-y: auto;
 }
 
 .screen.hidden {
@@ -174,6 +178,32 @@ button.small {
 }
 
 .row button {
+  flex: 1;
+}
+
+/* --- entry: choosing a side --------------------------------------------- */
+
+/* The only decision on the screen, so it gets the whole width and room to be
+   tapped. Stacked rather than side by side: these are not a primary and a
+   cancel, they are two different things to do, and putting them in a row made
+   them read as one choice with an afterthought next to it. */
+#choose {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#choose button {
+  padding: 15px 18px;
+}
+
+/* Its own flex column so the action row's `margin-top: auto` still reaches the
+   bottom. The row used to be a direct child of the screen; moving it in here
+   quietly stopped it working, which is what made these screens sit oddly. */
+#compose {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
   flex: 1;
 }
 
