@@ -41,75 +41,6 @@ static LAUNCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 
 /// How to reach Tor through obfs4 bridges on a censored network.
 #[derive(Clone, Debug)]
-pub struct BridgeSettings {
-    /// Absolute path to the `lyrebird` (obfs4) pluggable-transport binary.
-    /// The app bundles this and resolves the path at runtime.
-    pub lyrebird_path: std::path::PathBuf,
-    /// obfs4 bridge lines, e.g. `obfs4 1.2.3.4:443 <FINGERPRINT> cert=… iat-mode=0`.
-    /// Supplied by the app: built-in defaults and/or a line the user pasted
-    /// from <https://bridges.torproject.org>.
-    pub lines: Vec<String>,
-}
-
-/// Wire obfs4 bridges into the client config. Follows the arti-client 0.45
-/// documented pattern for `pt-client` exactly.
-fn configure_bridges(
-    builder: &mut arti_client::config::TorClientConfigBuilder,
-    bridges: &BridgeSettings,
-) -> Result<(), TorError> {
-    use arti_client::config::pt::TransportConfigBuilder;
-    use arti_client::config::{BridgeConfigBuilder, CfgPath};
-
-    if bridges.lines.is_empty() {
-        return Err(TorError::Launch("no bridge lines provided".into()));
-    }
-
-    for line in &bridges.lines {
-        let bridge: BridgeConfigBuilder = line
-            .parse()
-            .map_err(|e| TorError::Launch(format!("bad bridge line: {e}")))?;
-        builder.bridges().bridges().push(bridge);
-    }
-
-    // Register every transport named in the bridge lines (obfs4, snowflake, …),
-    // all served by the one bundled lyrebird binary, which provides them all.
-    // Deriving the set from the lines rather than hardcoding obfs4 means
-    // snowflake — whose config domain-fronts to a fixed broker and so does not
-    // rot like obfs4 bridge IPs — works with no code change.
-    let mut names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-    for line in &bridges.lines {
-        if let Some(name) = line.split_whitespace().next() {
-            names.insert(name);
-        }
-    }
-    for name in names {
-        let proto = name
-            .parse()
-            .map_err(|e| TorError::Launch(format!("bad transport name {name:?}: {e}")))?;
-        let mut transport = TransportConfigBuilder::default();
-        transport
-            .protocols(vec![proto])
-            .path(CfgPath::new_literal(bridges.lyrebird_path.clone()))
-            .run_on_startup(true);
-        builder.bridges().transports().push(transport);
-    }
-
-    Ok(())
-}
-
-/// Give up if the other person never shows. Deliberately long (the two people
-/// may press Start/Join minutes apart); the user can cancel any time.
-const MEET_TIMEOUT: Duration = Duration::from_secs(1800);
-
-/// Give up on joining Tor and report it, rather than sitting on the connecting
-/// screen forever. On a working network this takes ~20-40s; a network that
-/// blocks Tor otherwise hangs with no explanation and no way to retry.
-const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(150);
-
-/// Pause between dial attempts while joining. The host may not have published
-/// yet, so early failures are expected rather than fatal.
-const DIAL_RETRY: Duration = Duration::from_secs(4);
-
 pub struct TorTransport {
     client: Arc<TorClient<PreferredRuntime>>,
 }
@@ -127,7 +58,7 @@ impl TorTransport {
         // cache is the documented remedy (arti#783) — and with Arti's default
         // shared location we would not know what is safe to delete.
         let dir = app_tor_dir();
-        match Self::bootstrap_core(dir.as_deref(), None, &on_status).await {
+        match Self::bootstrap_core(dir.as_deref(), &on_status).await {
             Ok(t) => Ok(t),
             Err(first) => {
                 // Retry once from a clean slate. A stale or partially written
@@ -139,7 +70,7 @@ impl TorTransport {
                 if std::fs::remove_dir_all(dir).is_err() {
                     return Err(first);
                 }
-                Self::bootstrap_core(Some(dir), None, &on_status).await
+                Self::bootstrap_core(Some(dir), &on_status).await
             }
         }
     }
@@ -159,28 +90,18 @@ impl TorTransport {
         dir: Option<&std::path::Path>,
         on_status: impl Fn(Status),
     ) -> Result<Self, TorError> {
-        Self::bootstrap_core(dir, None, &on_status).await
-    }
-
-    /// As [`Self::bootstrap_in`], but route through **obfs4 bridges** — for
-    /// networks that block Tor. Needs the path to a `lyrebird` pluggable-
-    /// transport binary and at least one bridge line. Slower than a direct
-    /// connection; only worth using when the direct path is censored.
-    pub async fn bootstrap_bridged(
-        dir: Option<&std::path::Path>,
-        bridges: BridgeSettings,
-        on_status: impl Fn(Status),
-    ) -> Result<Self, TorError> {
-        Self::bootstrap_core(dir, Some(bridges), &on_status).await
+        Self::bootstrap_core(dir, &on_status).await
     }
 
     async fn bootstrap_core(
         dir: Option<&std::path::Path>,
-        bridges: Option<BridgeSettings>,
         on_status: &impl Fn(Status),
     ) -> Result<Self, TorError> {
         install_crypto_provider();
-        on_status(Status::BootstrappingTor { percent: 0 });
+        on_status(Status::BootstrappingTor {
+            percent: 0,
+            detail: "Starting".into(),
+        });
 
         let mut builder = TorClientConfig::builder();
         builder
@@ -213,10 +134,6 @@ impl TorTransport {
             builder
                 .storage()
                 .cache_dir(arti_client::config::CfgPath::new_literal(dir.join("cache")));
-        }
-
-        if let Some(bridges) = &bridges {
-            configure_bridges(&mut builder, bridges)?;
         }
 
         let config = builder
@@ -263,10 +180,13 @@ impl TorTransport {
                         }
                     }
                     _ = tick.tick() => {
-                        match &blocked {
-                            Some(d) => on_status(Status::BootstrappingTor { percent, detail: d.clone() }),
-                            None => on_status(Status::BootstrappingTor { percent, detail: st.to_string() }),
-                        }
+                        // A heartbeat, so the UI keeps moving through a silent
+                        // stretch. There is no new event here, so it repeats
+                        // whatever the last one said.
+                        on_status(Status::BootstrappingTor {
+                            percent,
+                            detail: blocked.clone().unwrap_or_default(),
+                        });
                     }
                     _ = tokio::time::sleep_until(deadline) => {
                         // Arti's progress is conn_frac*0.15 + dir_frac*0.85, so
