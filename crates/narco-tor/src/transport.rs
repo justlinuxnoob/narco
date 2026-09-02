@@ -41,6 +41,15 @@ const MEET_TIMEOUT: Duration = Duration::from_secs(1800);
 /// yet, so early failures are expected rather than fatal.
 const DIAL_RETRY: Duration = Duration::from_secs(4);
 
+/// Cap on a single handshake once a connection exists.
+///
+/// `MEET_TIMEOUT` bounds only the wait for a connection, not what happens on
+/// one. The handshake bottoms out in `read_exact`, which waits forever, so a
+/// peer that connected and then said nothing — a half-open circuit, or someone
+/// doing it on purpose — hung the session with no idle timer yet armed and no
+/// `DEL_ONION` ever reached. Generous, because it runs over Tor.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// Coarse progress, for a UI that must explain a slow connect.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Status {
@@ -154,17 +163,23 @@ impl TorTransport {
                 break Err(ConnectError::TimedOut);
             };
             on_status(Status::PeerFound);
-            match run_handshake(stream, derived).await {
-                Ok(conn) => break Ok(conn),
-                // A stray connector, or someone who typed different secrets.
-                // Keep the service up and wait for the real peer.
-                Err(ConnectError::Protocol(ProtoError::ConfirmMismatch))
-                | Err(ConnectError::Protocol(ProtoError::Reflection))
-                | Err(ConnectError::Io(_)) => {
+            // A connector that stalls must not block the real peer: the accept
+            // loop is serialized, so one silent connection would hold the door.
+            let handshake =
+                tokio::time::timeout(HANDSHAKE_TIMEOUT, run_handshake(stream, derived)).await;
+            match handshake {
+                Ok(Ok(conn)) => break Ok(conn),
+                // A stray connector, someone who typed different secrets, or
+                // one that went quiet. Keep the service up and wait for the
+                // real peer.
+                Ok(Err(ConnectError::Protocol(ProtoError::ConfirmMismatch)))
+                | Ok(Err(ConnectError::Protocol(ProtoError::Reflection)))
+                | Ok(Err(ConnectError::Io(_)))
+                | Err(_) => {
                     on_status(Status::WaitingForPeer);
                     continue;
                 }
-                Err(e) => break Err(e),
+                Ok(Err(e)) => break Err(e),
             }
         };
 
@@ -195,14 +210,19 @@ impl TorTransport {
             match socks5_connect(self.socks_port, &address, VIRTUAL_PORT).await {
                 Ok(stream) => {
                     on_status(Status::PeerFound);
-                    match run_handshake(stream, derived).await {
-                        Ok(conn) => return Ok(conn),
+                    let handshake =
+                        tokio::time::timeout(HANDSHAKE_TIMEOUT, run_handshake(stream, derived))
+                            .await;
+                    match handshake {
+                        Ok(Ok(conn)) => return Ok(conn),
                         // Reached the host but the secrets differ — retrying
                         // cannot help, so surface it.
-                        Err(ConnectError::Protocol(ProtoError::ConfirmMismatch)) => {
+                        Ok(Err(ConnectError::Protocol(ProtoError::ConfirmMismatch))) => {
                             return Err(ConnectError::Protocol(ProtoError::ConfirmMismatch))
                         }
-                        Err(_) => {
+                        // Anything else, including a host that stopped
+                        // answering mid-handshake, is worth another dial.
+                        Ok(Err(_)) | Err(_) => {
                             on_status(Status::WaitingForPeer);
                             tokio::time::sleep(DIAL_RETRY).await;
                         }

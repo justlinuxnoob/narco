@@ -89,9 +89,13 @@ pub fn derive_with_passphrase(raw_code: &str, raw_passphrase: &str) -> Result<De
 /// on every secret, so a party missing one cannot even locate the room, let
 /// alone impersonate a peer.
 pub fn derive_multi<S: AsRef<str>>(raw_secrets: &[S]) -> Result<Derived> {
-    let secrets: Vec<String> = raw_secrets
+    // Wrapped so the normalized copies are wiped when this returns. They are
+    // the room code in the clear, which is strictly worse to leak than any key
+    // derived from it: a key opens one session, the code reproduces every
+    // session — past and future — that anyone ever holds at that address.
+    let secrets: Vec<Zeroizing<String>> = raw_secrets
         .iter()
-        .map(|s| code::normalize(s.as_ref()))
+        .map(|s| Zeroizing::new(code::normalize(s.as_ref())))
         .filter(|s| !s.is_empty())
         .collect();
 
