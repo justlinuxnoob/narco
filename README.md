@@ -76,12 +76,13 @@ Arch and derivatives can build a package from [`packaging/PKGBUILD`](packaging/P
 
 Stated plainly, because a privacy claim that hides its limits is worthless.
 
-- **It is not instant.** Joining the Tor network takes about **25 seconds** and
-  the two apps then find each other in another **10 or so** — around half a
-  minute in total, measured by the live end-to-end test, not estimated. That
-  second part is the price of needing no server: an onion address has to be
-  published and propagate before anyone can dial it. Later connections are
-  quicker, because Tor keeps its network cache.
+- **It is not instant.** Joining the Tor network takes about **25 seconds**.
+  Finding each other after that has ranged from **10 seconds to nearly two
+  minutes** across test runs, because an onion address has to be published and
+  propagate through Tor's directory before anyone can dial it, and how long
+  that takes is not up to us. That is the price of needing no server.
+  Reconnecting to an address that is already published is much quicker —
+  measured at **2 seconds**.
 - **It does not protect a compromised device.** Plaintext is on both screens.
 - **A guessable secret is a guessable address.** The onion address is derived
   from the secret, so an attacker can guess secrets, derive addresses, and ask
