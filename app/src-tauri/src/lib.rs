@@ -75,10 +75,6 @@ enum UiEvent {
     Reconnecting { attempt: u32, of: u32 },
     /// Back. A fresh handshake completed at the same address.
     Reconnected,
-    /// The idle timeout is about to fire, or has been called off because
-    /// something happened. Ending a chat with no warning is an ambush; this
-    /// gives the user a chance to stay.
-    IdleWarning { seconds_left: u32, active: bool },
     /// Progress joining Tor, reported while the user is still typing.
     TorProgress {
         text: String,
@@ -168,10 +164,6 @@ fn emit(app: &AppHandle, e: UiEvent) {
     // coarse connection state.
     let line = match &e {
         UiEvent::Status { text, stage } => Some(format!("[narco] status[{stage}] {text}")),
-        UiEvent::IdleWarning { active, .. } => Some(format!(
-            "[narco] idle warning {}",
-            if *active { "shown" } else { "cleared" }
-        )),
         UiEvent::Ready => Some("[narco] handshake confirmed — chat live".to_string()),
         UiEvent::Reconnecting { attempt, of } => {
             Some(format!("[narco] connection lost — reconnecting {attempt}/{of}"))
@@ -328,7 +320,6 @@ async fn connect(
     app: AppHandle,
     state: State<'_, AppState>,
     secrets: Vec<String>,
-    idle_secs: u64,
     host: bool,
     nickname: String,
 ) -> Result<(), String> {
@@ -367,7 +358,7 @@ async fn connect(
         // Catch panics so a bug can never leave the UI waiting forever with no
         // explanation. Every path out of here emits an Ended event.
         let reason = match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-            run_session(&app, derived, rx, idle_secs, tor, host, nickname),
+            run_session(&app, derived, rx, tor, host, nickname),
         ))
         .await
         {
@@ -417,9 +408,6 @@ const MAX_RECONNECTS: u32 = 6;
 /// minutes, which covers a phone that was backgrounded, and then it stops and
 /// says so.
 const RECONNECT_ATTEMPT: Duration = Duration::from_secs(50);
-
-/// How long before the idle timeout the user is warned.
-const IDLE_WARNING: Duration = Duration::from_secs(60);
 
 /// How many file transfers may be part-received at once.
 ///
@@ -474,18 +462,10 @@ async fn run_session(
     app: &AppHandle,
     derived: narco_proto::Derived,
     mut rx: mpsc::Receiver<Cmd>,
-    idle_secs: u64,
     tor: Arc<tokio::sync::OnceCell<Arc<TorTransport>>>,
     host: bool,
     nickname: String,
 ) -> String {
-    // 0 means the user chose "never". Represent it as an effectively unreachable
-    // deadline rather than branching the select! arm.
-    let idle = if idle_secs == 0 {
-        Duration::from_secs(u32::MAX as u64)
-    } else {
-        Duration::from_secs(idle_secs)
-    };
     // Usually already done: the client was bootstrapped at launch.
     let transport = match ensure_tor(app, &tor).await {
         Ok(t) => t,
@@ -587,7 +567,7 @@ async fn run_session(
         //
         // `recv_frame` is two sequential `read_exact` calls, so it is not
         // cancellation-safe. `select!` drops the losing branch's future, so every
-        // time the user sent a message or the idle timer ticked while a frame was
+        // time the user sent a message or a command arrived while a frame was
         // half-read, the bytes already taken off the socket were lost. The stream
         // desynchronised, the next length prefix was read out of the middle of a
         // message, and the session died telling the user their peer had tampered
@@ -606,12 +586,6 @@ async fn run_session(
             }
         });
 
-        // Cleared on any traffic, so a warning shown once does not stay on screen
-        // after the conversation resumes.
-        let mut idle_warned = false;
-        // When silence will end the session. Pushed forward by traffic, never by
-        // the loop merely going round again.
-        let mut idle_at = tokio::time::Instant::now() + idle;
 
         // Pieces of files still arriving, keyed by transfer. Memory only, and gone
         // with the session like everything else.
@@ -626,11 +600,6 @@ async fn run_session(
                     let Some(frame) = frame else {
                         break 'session ("The other person disconnected.".to_string(), true);
                     };
-                    idle_at = tokio::time::Instant::now() + idle;
-                    if idle_warned {
-                        idle_warned = false;
-                        emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
-                    }
                     match session.handle(&frame) {
                         Ok(Event::Message(m)) => match message::decode(&m) {
                             Some(message::Incoming::Text { from, text }) => {
@@ -720,11 +689,6 @@ async fn run_session(
                 cmd = rx.recv() => {
                     match cmd {
                         Some(Cmd::Send(text)) => {
-                            idle_at = tokio::time::Instant::now() + idle;
-                            if idle_warned {
-                                idle_warned = false;
-                                emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
-                            }
                             match session.encrypt(&message::encode_text(&nickname, &text)) {
                                 Ok(frame) => {
                                     if send_frame(&mut writer, &frame).await.is_err() {
@@ -744,7 +708,6 @@ async fn run_session(
                             }
                         }
                         Some(Cmd::SendFile { name, data }) => {
-                            idle_at = tokio::time::Instant::now() + idle;
                             // Each piece is an ordinary encrypted message, so a
                             // file gets exactly the protection everything else in
                             // the room gets, and the transport never learns it is
@@ -781,8 +744,8 @@ async fn run_session(
                                 // This loop holds the whole `select!` while it
                                 // runs, and a large file over a Tor circuit runs
                                 // for a long time. Nothing else was polled: the
-                                // peer's messages went unread, the idle timers
-                                // did not tick, and — worst — End sat unread in
+                                // peer's messages went unread and — worst — End
+                                // sat unread in
                                 // the channel, so the one button that stops
                                 // everything looked broken for the length of the
                                 // transfer.
@@ -803,32 +766,17 @@ async fn run_session(
                     }
                 }
 
-                // Idle reaper, in two stages. The first pass warns and the second
-                // ends it, so silence never closes a chat without notice.
+                // There is deliberately no timer here.
                 //
-                // Both arms sleep until a fixed instant rather than for a
-                // duration. `select!` builds its futures afresh on every pass,
-                // so a `sleep(idle)` restarted from zero each time round the
-                // loop — including the pass where the warning had just fired.
-                // A five-minute setting warned at four minutes and then ended
-                // the session at nine, nearly twice what the user asked for.
-                // `idle_at` moves only when there is actual traffic.
-                _ = tokio::time::sleep_until(idle_at - IDLE_WARNING.min(idle)), if !idle_warned => {
-                    idle_warned = true;
-                    emit(app, UiEvent::IdleWarning {
-                        seconds_left: IDLE_WARNING.min(idle).as_secs() as u32,
-                        active: true,
-                    });
-                }
-                _ = tokio::time::sleep_until(idle_at) => {
-                    break 'session (
-                        format!(
-                            "Session ended after {} minutes of silence.",
-                            idle.as_secs() / 60
-                        ),
-                        false,
-                    );
-                }
+                // A conversation used to end itself after a stretch of silence,
+                // with a warning a minute before. It is gone: a chat ends when
+                // one of the two people ends it, or when the connection is
+                // genuinely lost and cannot be got back. Silence is not a
+                // reason. Two people leaving a room open between messages is
+                // the normal way to use this, and a clock that closes it out
+                // from under them is a setting to get wrong rather than a
+                // protection — the keys live exactly as long as the session
+                // either way, and ending it is one button.
             }
         };
 

@@ -71,9 +71,10 @@ Arch and derivatives can build a package from [`packaging/PKGBUILD`](packaging/P
   the socket; Narco publishes and dials the same address again and carries on,
   with the conversation still on screen. A fresh handshake runs each time, so
   it is a new session at the same address rather than a resumed one.
-- **Ends when you say so.** Pressing end or closing the app wipes everything.
-  A silence timeout is available but off by default, and when it is on it warns
-  a minute ahead rather than closing the chat without notice.
+- **Ends when you say so, and only then.** Pressing end or closing the app wipes
+  everything. Nothing else closes a chat: there is no silence timer, because two
+  people leaving a room open between messages is the normal way to use this, and
+  the keys live exactly as long as the session either way.
 - **Guessing is bounded.** A host answers five wrong secrets, each more slowly
   than the last, and then stops.
 

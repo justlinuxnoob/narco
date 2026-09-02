@@ -30,16 +30,6 @@
       <details id="settings">
         <summary>settings</summary>
         <label class="setting">
-          <span>end chat after silence</span>
-          <select id="idle">
-            <option value="300">5 minutes</option>
-            <option value="600">10 minutes</option>
-            <option value="1800">30 minutes</option>
-            <option value="3600">1 hour</option>
-            <option value="0" selected>never</option>
-          </select>
-        </label>
-        <label class="setting">
           <span>messages vanish after</span>
           <select id="burn">
             <option value="0" selected>off</option>
@@ -49,8 +39,8 @@
           </select>
         </label>
         <p class="hint">
-          Nothing you type is written to disk. These only change how long it
-          stays in memory.
+          Nothing you type is written to disk. This only changes how long it
+          stays on screen. A chat ends when one of you ends it.
         </p>
       </details>
 
@@ -122,7 +112,6 @@
         <span class="live" id="chat-mode">encrypted</span>
         <button id="end" class="ghost small" type="button">end</button>
       </header>
-      <p class="warn" id="idle-warning" role="alert" hidden></p>
       <ol id="messages" aria-live="polite"></ol>
       <p class="hint" id="transfer" hidden></p>
       <form id="composer">

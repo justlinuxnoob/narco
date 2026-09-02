@@ -15,7 +15,6 @@ type UiEvent =
   | { kind: "ready" }
   | { kind: "message"; from: string; text: string }
   | { kind: "ended"; reason: string }
-  | { kind: "idleWarning"; secondsLeft: number; active: boolean }
   | { kind: "reconnecting"; attempt: number; of: number }
   | { kind: "reconnected" }
   | { kind: "file"; from: string; name: string; data: string }
@@ -266,9 +265,8 @@ async function start(host: boolean) {
   show("connecting");
   startElapsed();
 
-  const idleSecs = Number($<HTMLSelectElement>("idle").value);
   try {
-    await invoke("connect", { secrets, idleSecs, host, nickname: "" });
+    await invoke("connect", { secrets, host, nickname: "" });
   } catch (e) {
     endWith(String(e));
   }
@@ -313,9 +311,6 @@ const messages = $<HTMLOListElement>("messages");
 const input = $<HTMLInputElement>("input");
 /** Timers for disappearing messages, so they can be cancelled on wipe. */
 const burnTimers: number[] = [];
-
-/** Ticks the idle countdown while it is on screen. */
-let idleCountdown: number | undefined;
 
 /** Object URLs for received files, revoked when the conversation is wiped. */
 const blobUrls: string[] = [];
@@ -514,9 +509,6 @@ $("end").addEventListener("click", () => invoke("end_session"));
 
 function endWith(reason: string) {
   stopElapsed();
-  if (idleCountdown !== undefined) clearInterval(idleCountdown);
-  idleCountdown = undefined;
-  $("idle-warning").hidden = true;
   for (const t of burnTimers.splice(0)) clearTimeout(t);
   // Destroy every trace of the conversation in the UI. Rust has already
   // zeroized the keys.
@@ -606,25 +598,6 @@ listen<UiEvent>("narco", ({ payload }) => {
     case "message":
       addMessage(payload.text, "them", payload.from);
       break;
-    case "idleWarning": {
-      // Counts down rather than showing a fixed number, so it is obviously
-      // live and obviously avoidable — anything you send calls it off.
-      const el = $("idle-warning");
-      if (idleCountdown !== undefined) clearInterval(idleCountdown);
-      if (!payload.active) {
-        el.hidden = true;
-        break;
-      }
-      let left = payload.secondsLeft;
-      const tick = () => {
-        el.textContent = `No activity — this chat ends in ${left}s. Send anything to stay.`;
-        if (left-- <= 0 && idleCountdown !== undefined) clearInterval(idleCountdown);
-      };
-      tick();
-      el.hidden = false;
-      idleCountdown = window.setInterval(tick, 1000);
-      break;
-    }
     // The conversation is not over, so the messages stay. Only the header
     // changes, and the composer waits until there is somewhere to send.
     case "reconnecting":

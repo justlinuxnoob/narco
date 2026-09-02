@@ -8,9 +8,16 @@ cannot authenticate, and cannot retain.**
 
 The default transport (§11) uses **no server at all** — the shared secrets derive
 an onion address, so the two peers meet through Tor's existing directory with
-nothing hosted by anyone. Sections 6–9 additionally describe an optional
-self-hosted relay for people who want instant connections instead; every security
-property below holds even if that relay's operator is actively malicious.
+nothing hosted by anyone.
+
+**Sections 6–9 describe a relay that is no longer shipped.** Narco once carried
+a WebSocket relay as an optional faster transport; the crate was deleted when
+the Tor path became the only one, and nothing in the app can speak to a relay
+today. Those sections are kept because the security argument they make is the
+reason the design is shaped the way it is — every property holds *even if* a
+relay operator is actively malicious — but read them as history, not as
+something you can run. In particular the room lifecycle and idle expiry in §8
+are the relay's, and describe nothing in the current app.
 
 ---
 
