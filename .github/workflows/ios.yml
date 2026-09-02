@@ -99,10 +99,23 @@ jobs:
           echo "TOR_XCF_DEVICE=$dev" >> "$GITHUB_ENV"
           echo "TOR_XCF_SIM=$sim" >> "$GITHUB_ENV"
           # tor_run_main is what src/embedded.rs calls; if it is not exported
-          # the link fails much later with far less to go on.
-          nm -gU "$dev/tor.framework/tor" 2>/dev/null | grep -q "_tor_run_main" \
-            || { echo "::error::tor_run_main is not exported by the device slice"; exit 1; }
-          echo "tor_run_main present in the device slice"
+          # the link fails much later with far less to go on. Located rather
+          # than assumed: the binary sits under Versions/A in these slices, and
+          # hardcoding tor.framework/tor made this guard fail on a framework
+          # that was perfectly fine.
+          lib="$(find "$dev" -type f -name tor | head -1)"
+          test -n "$lib" || { echo "::error::no tor library in the device slice"; exit 1; }
+          echo "device library: $lib"
+          # Two ways of asking, because the first one getting the flags wrong
+          # is what failed 0.7.0 against a framework that was perfectly fine.
+          # Only a genuine absence should stop the build.
+          if nm -gj "$lib" 2>/dev/null | grep -qx "_tor_run_main" \
+             || strings -a "$lib" | grep -qx "tor_run_main"; then
+            echo "tor_run_main is present"
+          else
+            echo "::error::tor_run_main is not in $lib — the framework layout changed"
+            exit 1
+          fi
 
       # Answers the question that actually matters first: does Arti compile for
       # a real iPhone at all? It pulls in a large dependency tree and a C SQLite

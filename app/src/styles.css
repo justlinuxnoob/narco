@@ -20,6 +20,7 @@ body {
 }
 
 body {
+  overflow-x: hidden;
   background: var(--paper);
   color: var(--ink);
   font: 15px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -31,12 +32,22 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 28px 22px calc(22px + env(safe-area-inset-bottom));
+  /* Every side, not just the bottom. The viewport is `viewport-fit=cover`,
+     which is what puts content under the notch in the first place, so the top
+     inset is the one that decides whether the title sits beneath the status
+     bar. Left and right matter in landscape and on curved displays. */
+  padding: calc(28px + env(safe-area-inset-top)) calc(22px + env(safe-area-inset-right))
+    calc(22px + env(safe-area-inset-bottom)) calc(22px + env(safe-area-inset-left));
   gap: 14px;
   /* A phone with the keyboard up, several secrets and the settings open runs
      out of room quickly, and the body is `overflow: hidden` — without this the
      buttons end up below the fold with no way to reach them. */
   overflow-y: auto;
+  /* Setting overflow-y alone makes overflow-x compute to `auto` as well, so
+     any content a pixel too wide became sideways-scrollable. Nothing here is
+     meant to scroll horizontally. */
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 }
 
 .screen.hidden {
@@ -89,6 +100,7 @@ h1 {
 
 input {
   width: 100%;
+  min-width: 0;
   padding: 11px 12px;
   border: 1px solid var(--ink);
   border-radius: var(--radius);
@@ -222,7 +234,10 @@ button.small {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 14px 18px;
+  /* #chat sets padding: 0, so without this the header sits at y=0 — under the
+     status bar and the notch. */
+  padding: calc(14px + env(safe-area-inset-top)) calc(18px + env(safe-area-inset-right)) 14px
+    calc(18px + env(safe-area-inset-left));
   border-bottom: 1px solid var(--line);
   font-size: 12px;
 }
@@ -246,8 +261,11 @@ button.small {
 #messages {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
   list-style: none;
-  padding: 16px 18px;
+  padding: 16px calc(18px + env(safe-area-inset-right)) 16px
+    calc(18px + env(safe-area-inset-left));
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -284,7 +302,8 @@ button.small {
 #composer {
   display: flex;
   gap: 8px;
-  padding: 14px 18px calc(14px + env(safe-area-inset-bottom));
+  padding: 14px calc(18px + env(safe-area-inset-right))
+    calc(14px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left));
   border-top: 1px solid var(--line);
 }
 
