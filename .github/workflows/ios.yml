@@ -148,35 +148,16 @@ jobs:
       # nowhere, which is why every symbol resolved at compile time and none at
       # link time.
       #
-      # Both slices go on the search path and the linker takes the one whose
-      # architecture matches, so device and simulator builds each find theirs
-      # without the project needing to know which is being built.
+      # The script merges into existing settings rather than adding a second
+      # copy of the key, and is tested against a sample project file in CI
+      # before it touches the real one.
       - name: Link the tor framework into the Xcode project
         shell: bash
         run: |
           set -euo pipefail
-          pbx=app/src-tauri/gen/apple/narco-app.xcodeproj/project.pbxproj
-          test -f "$pbx"
-          python3 - "$pbx" "$PWD/vendor/tor.xcframework" <<'PY'
-          import re, sys
-          pbx, xcf = sys.argv[1], sys.argv[2]
-          dev = f"{xcf}/ios-arm64"
-          sim = f"{xcf}/ios-arm64_x86_64-simulator"
-          s = open(pbx).read()
-
-          inject = (
-              'buildSettings = {\n'
-              f'\t\t\t\tFRAMEWORK_SEARCH_PATHS = ("$(inherited)", "{dev}", "{sim}");\n'
-              '\t\t\t\tOTHER_LDFLAGS = ("$(inherited)", "-framework", "tor");\n'
-          )
-          before = s.count("buildSettings = {")
-          s = s.replace("buildSettings = {", inject)
-          open(pbx, "w").write(s)
-
-          after = open(pbx).read().count("FRAMEWORK_SEARCH_PATHS")
-          assert before > 0 and after == before, f"patched {after} of {before} build configurations"
-          print(f"linked tor into {after} build configurations")
-          PY
+          python3 scripts/link-tor-into-xcode.py \
+            app/src-tauri/gen/apple/narco-app.xcodeproj/project.pbxproj \
+            "$PWD/vendor/tor.xcframework"
 
       # Unsigned, for the simulator. This proves the whole app links — Rust,
       # Arti and the Tauri iOS shell — without needing a signing identity, so it
