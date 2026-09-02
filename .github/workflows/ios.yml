@@ -128,6 +128,24 @@ jobs:
           printf '%s\n' "$ASC_KEY_P8" > "$key"
           chmod 600 "$key"
 
+          # Apple answering 401 means the credentials were rejected, which is
+          # a different problem to the plumbing being wrong and needs telling
+          # apart. Checks shape only — nothing here prints a secret.
+          echo "--- credential shape ---"
+          if openssl pkey -in "$key" -noout 2>/dev/null; then
+            echo "  private key: valid PEM"
+          else
+            echo "::error::APP_STORE_CONNECT_PRIVATE_KEY is not a valid PEM key. Paste the whole .p8 including the BEGIN and END lines, with its line breaks."
+            exit 1
+          fi
+          echo "  key id:    ${#ASC_KEY_ID} chars (Apple issues 10)"
+          echo "  issuer id: ${#ASC_ISSUER_ID} chars (Apple issues a 36-char UUID)"
+          echo "  team id:   ${#APPLE_DEVELOPMENT_TEAM} chars (Apple issues 10)"
+          case "$ASC_ISSUER_ID" in
+            ????????-????-????-????-????????????) : ;;
+            *) echo "::error::APP_STORE_CONNECT_ISSUER_ID is not a UUID. It is the 'Issuer ID' at the top of the Integrations page — not the Key ID, and not the Team ID." ; exit 1 ;;
+          esac
+
           # The web assets are normally built by the Tauri CLI; xcodebuild only
           # knows how to build the Rust half.
           (cd app && npm run build)
