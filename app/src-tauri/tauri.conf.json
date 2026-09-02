@@ -46,6 +46,9 @@
       "webviewInstallMode": {
         "type": "embedBootstrapper"
       }
+    },
+    "iOS": {
+      "minimumSystemVersion": "15.0"
     }
   }
 }
