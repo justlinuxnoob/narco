@@ -82,6 +82,11 @@ jobs:
       # Published by the Tor.framework project, which is what Onion Browser and
       # Orbot iOS ship, and the release below is tor 0.4.9.11: the identical
       # version the Expert Bundle gives Windows, Linux and Android.
+      # The same C tor the other three platforms run, as a static library
+      # rather than a binary — because iOS will not execute a second binary.
+      # Published by the Tor.framework project, which is what Onion Browser and
+      # Orbot iOS ship, and this release is tor 0.4.9.11: the identical version
+      # the Expert Bundle gives Windows, Linux and Android.
       - name: Fetch the tor xcframework
         shell: bash
         run: |
@@ -91,6 +96,7 @@ jobs:
           curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o tor-xcf.zip "$url"
           mkdir -p vendor && unzip -q tor-xcf.zip -d vendor
           ls vendor/tor.xcframework
+
           # One slice per target. Device and simulator are different libraries
           # and linking the wrong one fails late and confusingly.
           dev="$PWD/vendor/tor.xcframework/ios-arm64"
@@ -98,39 +104,18 @@ jobs:
           test -d "$dev" && test -d "$sim"
           echo "TOR_XCF_DEVICE=$dev" >> "$GITHUB_ENV"
           echo "TOR_XCF_SIM=$sim" >> "$GITHUB_ENV"
-          # Informational, never a gate. Two attempts at gating on this both
-          # rejected a framework that was fine: once on nm's flags, and once
-          # because `grep -q` closes the pipe on its first match, `strings`
-          # dies of SIGPIPE, and `pipefail` reports the whole pipeline failed —
-          # so finding the symbol is what made the check say it was missing.
-          # Linking is the real test and says "undefined symbol: _tor_run_main"
-          # plainly enough.
+
+          # Reported, never gated. Gating on this rejected a correct framework
+          # twice — once on nm's flags, once because `grep -q` closes the pipe
+          # on its first match, `strings` dies of SIGPIPE and `pipefail` calls
+          # the pipeline failed, so *finding* the symbol is what made the check
+          # say it was missing. Linking is the real test and says "undefined
+          # symbol: _tor_run_main" plainly enough.
           lib="$(find "$dev" -type f -name tor | head -1)"
           echo "device library: ${lib:-none found}"
           if [ -n "$lib" ]; then
             found=$(strings -a "$lib" 2>/dev/null | grep -cx "tor_run_main" || true)
             echo "tor_run_main occurrences: ${found:-0}"
-          fi
-
-          echo "TOR_XCF_DEVICE=$dev" >> "$GITHUB_ENV"
-          echo "TOR_XCF_SIM=$sim" >> "$GITHUB_ENV"
-          # tor_run_main is what src/embedded.rs calls; if it is not exported
-          # the link fails much later with far less to go on. Located rather
-          # than assumed: the binary sits under Versions/A in these slices, and
-          # hardcoding tor.framework/tor made this guard fail on a framework
-          # that was perfectly fine.
-          lib="$(find "$dev" -type f -name tor | head -1)"
-          test -n "$lib" || { echo "::error::no tor library in the device slice"; exit 1; }
-          echo "device library: $lib"
-          # Two ways of asking, because the first one getting the flags wrong
-          # is what failed 0.7.0 against a framework that was perfectly fine.
-          # Only a genuine absence should stop the build.
-          if nm -gj "$lib" 2>/dev/null | grep -qx "_tor_run_main" \
-             || strings -a "$lib" | grep -qx "tor_run_main"; then
-            echo "tor_run_main is present"
-          else
-            echo "::error::tor_run_main is not in $lib — the framework layout changed"
-            exit 1
           fi
 
       # Answers the question that actually matters first: does Arti compile for
