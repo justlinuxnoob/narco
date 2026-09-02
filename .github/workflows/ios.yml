@@ -187,11 +187,43 @@ jobs:
             exit 1
           fi
 
-          echo "--- building and exporting ---"
-          (cd app && npm run tauri ios build -- --export-method app-store-connect)
+          # The CLI builds and archives, then runs `xcodebuild -exportArchive`
+          # itself — without the API key, so export fails with "No Accounts"
+          # exactly as the build did before it. Same division of labour one
+          # level down: let the CLI get as far as the archive, then export it
+          # here where the key can be passed. Its failure is expected, so the
+          # archive existing afterwards is what decides whether the build
+          # actually worked.
+          echo "--- building and archiving ---"
+          (cd app && npm run tauri ios build -- --export-method app-store-connect) || true
 
-          ipa="$(find app/src-tauri/gen/apple/build -name '*.ipa' | head -1)"
-          test -n "$ipa" || { echo "::error::no .ipa was produced"; exit 1; }
+          archive="$(find app/src-tauri/gen/apple "$HOME/Library/Developer/Xcode/Archives" \
+                       -name '*.xcarchive' -print 2>/dev/null | head -1)"
+          if [ -z "$archive" ]; then
+            echo "::error::no .xcarchive was produced — the build itself failed, not the export"
+            exit 1
+          fi
+          echo "archive: $archive"
+
+          echo "--- exporting ---"
+          mkdir -p build
+          {
+            printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+            printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+            printf '%s\n' '<plist version="1.0"><dict>'
+            printf '%s\n' '<key>method</key><string>app-store-connect</string>'
+            printf '%s\n' "<key>teamID</key><string>${APPLE_DEVELOPMENT_TEAM}</string>"
+            printf '%s\n' '<key>uploadSymbols</key><true/>'
+            printf '%s\n' '</dict></plist>'
+          } > build/ExportOptions.plist
+
+          xcodebuild "${auth[@]}" -exportArchive \
+            -archivePath "$archive" \
+            -exportPath "$PWD/build/ipa" \
+            -exportOptionsPlist build/ExportOptions.plist
+
+          ipa="$(find build/ipa -name '*.ipa' | head -1)"
+          test -n "$ipa" || { echo "::error::export produced no .ipa"; exit 1; }
           echo "uploading $ipa"
           xcrun altool --upload-app -f "$ipa" -t ios \
             --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
@@ -203,5 +235,5 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
           path: |
-            app/src-tauri/gen/apple/build/**/*.ipa
+            build/ipa/*.ipa
             app/src-tauri/gen/apple/build/**/*.app
