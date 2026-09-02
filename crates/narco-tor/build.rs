@@ -17,17 +17,22 @@ fn main() {
         return;
     }
 
-    let Ok(dir) = std::env::var("NARCO_TOR_XCFRAMEWORK") else {
-        // Left unset for `cargo check`, which never links. A real build without
-        // it fails at link time with an undefined `tor_run_main`, which names
-        // the problem clearly enough.
-        println!(
-            "cargo:warning=NARCO_TOR_XCFRAMEWORK is not set; iOS linking will \
-             fail unless this is a check-only build"
-        );
-        return;
-    };
+    // Loud, not a warning. Without it the build dies much later as an
+    // undefined `_tor_run_main` from the linker, which does not say whether the
+    // variable never arrived or the flags were wrong — and that difference is
+    // the whole diagnosis.
+    let dir = std::env::var("NARCO_TOR_XCFRAMEWORK").unwrap_or_else(|_| {
+        panic!(
+            "NARCO_TOR_XCFRAMEWORK is not set. iOS links the C tor from the \
+             tor.xcframework; the workflow sets this per target. Use \
+             `--features check-embedded` for a check-only build off iOS."
+        )
+    });
 
+    // Printed so the build log shows which slice was used. Linking the device
+    // slice into a simulator build fails in exactly the same way as not
+    // linking at all.
+    println!("cargo:warning=linking tor from {dir}");
     println!("cargo:rustc-link-search=framework={dir}");
     println!("cargo:rustc-link-lib=framework=tor");
 
