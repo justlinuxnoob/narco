@@ -83,7 +83,10 @@ pub fn encode_file_chunk(
     out.extend_from_slice(&(name_len as u16).to_be_bytes());
     out.extend_from_slice(&name_bytes[..name_len]);
     out.extend_from_slice(data);
-    debug_assert!(out.len() <= MAX_PLAINTEXT, "a chunk must fit in one message");
+    debug_assert!(
+        out.len() <= MAX_PLAINTEXT,
+        "a chunk must fit in one message"
+    );
     out
 }
 

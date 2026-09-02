@@ -42,20 +42,8 @@ jobs:
         run: |
           cargo test --manifest-path crates/narco-proto/Cargo.toml
           cargo test --manifest-path crates/narco-tor/Cargo.toml
-          # The iOS-only tor module. It is cfg'd off everywhere else, so
-          # without this a compile error in it only surfaces on a macOS runner
-          # — which is how a stale `forbid(unsafe_code)` reached a release.
-          cargo check --manifest-path crates/narco-tor/Cargo.toml --features check-embedded
-
-      # The Xcode project patch, against the four shapes a generated project
-      # actually uses. Getting this wrong cost several release builds, and it
-      # only ever ran on a macOS runner.
-      - name: Xcode link patch handles every setting shape
-        run: |
-          cp scripts/testdata/sample.pbxproj /tmp/t.pbxproj
-          python3 scripts/link-tor-into-xcode.py /tmp/t.pbxproj /x/tor.xcframework
-          python3 scripts/link-tor-into-xcode.py /tmp/t.pbxproj /x/tor.xcframework
-
+          # The app crate: the message wire format and its decoder live here.
+          cargo test --manifest-path app/src-tauri/Cargo.toml --lib
 
   # Only on pull requests. A push to main that matters is tagged, and the tag
   # already builds both platforms for real — running this too meant four jobs

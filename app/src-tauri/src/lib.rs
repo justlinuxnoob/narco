@@ -26,7 +26,10 @@ enum Cmd {
     Send(String),
     /// A file to cut up and send. Held in memory only: it came from the user's
     /// own disk and never goes back to ours.
-    SendFile { name: String, data: Vec<u8> },
+    SendFile {
+        name: String,
+        data: Vec<u8>,
+    },
     End,
 }
 
@@ -156,9 +159,10 @@ fn emit(app: &AppHandle, e: UiEvent) {
     // coarse connection state.
     let line = match &e {
         UiEvent::Status { text, stage } => Some(format!("[narco] status[{stage}] {text}")),
-        UiEvent::IdleWarning { active, .. } => {
-            Some(format!("[narco] idle warning {}", if *active { "shown" } else { "cleared" }))
-        }
+        UiEvent::IdleWarning { active, .. } => Some(format!(
+            "[narco] idle warning {}",
+            if *active { "shown" } else { "cleared" }
+        )),
         UiEvent::Ready => Some("[narco] handshake confirmed — chat live".to_string()),
         UiEvent::Reconnecting => Some("[narco] connection lost — reconnecting".to_string()),
         UiEvent::Reconnected => Some("[narco] reconnected".to_string()),
@@ -173,7 +177,12 @@ fn emit(app: &AppHandle, e: UiEvent) {
         UiEvent::Message { .. } => None, // never log message events
         UiEvent::File { .. } => None,    // nor file contents
         // Only that a transfer is happening, never the name or the bytes.
-        UiEvent::FileProgress { sent, total, outgoing, .. } => Some(format!(
+        UiEvent::FileProgress {
+            sent,
+            total,
+            outgoing,
+            ..
+        } => Some(format!(
             "[narco] file {} {sent}/{total}",
             if *outgoing { "sending" } else { "receiving" }
         )),
@@ -400,267 +409,267 @@ async fn run_session(
     let mut reconnects = 0u32;
 
     let reason = 'connection: loop {
-    let app_status = app.clone();
-    let cb = move |s| emit_status(&app_status, s);
-    // The starter hosts the onion service; the joiner only dials it. One side
-    // publishing and the other dialling is what makes a device never connect to
-    // itself.
-    // Cancel has to work *here*, not just once the chat is up. Finding the
-    // other person is where a user actually gives up, and the End command used
-    // to sit unread in the channel until the 30-minute meet timeout: the onion
-    // service stayed published, the session stayed alive, and if a peer turned
-    // up in the meantime the UI jumped into a chat the user thought they had
-    // killed. Meanwhile the front end had already claimed "You cancelled."
-    let connected = tokio::select! {
-        result = async {
-            if host {
-                transport.host(&derived, cb).await
-            } else {
-                transport.join(&derived, cb).await
-            }
-        } => result,
+        let app_status = app.clone();
+        let cb = move |s| emit_status(&app_status, s);
+        // The starter hosts the onion service; the joiner only dials it. One side
+        // publishing and the other dialling is what makes a device never connect to
+        // itself.
+        // Cancel has to work *here*, not just once the chat is up. Finding the
+        // other person is where a user actually gives up, and the End command used
+        // to sit unread in the channel until the 30-minute meet timeout: the onion
+        // service stayed published, the session stayed alive, and if a peer turned
+        // up in the meantime the UI jumped into a chat the user thought they had
+        // killed. Meanwhile the front end had already claimed "You cancelled."
+        let connected = tokio::select! {
+            result = async {
+                if host {
+                    transport.host(&derived, cb).await
+                } else {
+                    transport.join(&derived, cb).await
+                }
+            } => result,
 
-        // `Receiver::recv` is cancellation-safe, so losing this race costs
-        // nothing; anything that is not End would have been ignored anyway.
-        _ = async {
-            while let Some(cmd) = rx.recv().await {
-                if matches!(cmd, Cmd::End) {
+            // `Receiver::recv` is cancellation-safe, so losing this race costs
+            // nothing; anything that is not End would have been ignored anyway.
+            _ = async {
+                while let Some(cmd) = rx.recv().await {
+                    if matches!(cmd, Cmd::End) {
+                        break;
+                    }
+                }
+            } => return "You cancelled.".into(),
+        };
+
+        let Connected {
+            mut session,
+            stream,
+        } = match connected {
+            Ok(c) => c,
+            Err(e) => {
+                // Failing to connect at all is the user's problem to see. Failing
+                // to get back is worth another try, since they were talking a
+                // moment ago.
+                if reconnects == 0 {
+                    break 'connection e.to_string();
+                }
+                reconnects += 1;
+                if reconnects > MAX_RECONNECTS {
+                    break 'connection "Lost the connection and could not get it back.".into();
+                }
+                continue 'connection;
+            }
+        };
+
+        if reconnects == 0 {
+            emit(app, UiEvent::Ready);
+        } else {
+            emit(app, UiEvent::Reconnected);
+        }
+
+        let (mut reader, mut writer) = tokio::io::split(stream);
+
+        // Frames are read in a task of their own, not in a `select!` arm.
+        //
+        // `recv_frame` is two sequential `read_exact` calls, so it is not
+        // cancellation-safe. `select!` drops the losing branch's future, so every
+        // time the user sent a message or the idle timer ticked while a frame was
+        // half-read, the bytes already taken off the socket were lost. The stream
+        // desynchronised, the next length prefix was read out of the middle of a
+        // message, and the session died telling the user their peer had tampered
+        // with it — for a message they had just sent themselves. Padding buckets
+        // start at 256 bytes and the next is 1024, so any message past roughly 230
+        // characters spans several reads and hits this routinely.
+        //
+        // `Receiver::recv` is cancellation-safe, so the race now happens somewhere
+        // losing it costs nothing.
+        let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(8);
+        let reader_task = tauri::async_runtime::spawn(async move {
+            while let Ok(frame) = recv_frame(&mut reader).await {
+                if frame_tx.send(frame).await.is_err() {
                     break;
                 }
             }
-        } => return "You cancelled.".into(),
-    };
+        });
 
-    let Connected {
-        mut session,
-        stream,
-    } = match connected {
-        Ok(c) => c,
-        Err(e) => {
-            // Failing to connect at all is the user's problem to see. Failing
-            // to get back is worth another try, since they were talking a
-            // moment ago.
-            if reconnects == 0 {
-                break 'connection e.to_string();
-            }
-            reconnects += 1;
-            if reconnects > MAX_RECONNECTS {
-                break 'connection "Lost the connection and could not get it back.".into();
-            }
-            continue 'connection;
-        }
-    };
+        // Cleared on any traffic, so a warning shown once does not stay on screen
+        // after the conversation resumes.
+        let mut idle_warned = false;
 
-    if reconnects == 0 {
-        emit(app, UiEvent::Ready);
-    } else {
-        emit(app, UiEvent::Reconnected);
-    }
+        // Pieces of files still arriving, keyed by transfer. Memory only, and gone
+        // with the session like everything else.
+        let mut incoming_files: std::collections::HashMap<u64, (String, Vec<Vec<u8>>)> =
+            std::collections::HashMap::new();
+        let mut next_transfer_id: u64 = 0;
 
-    let (mut reader, mut writer) = tokio::io::split(stream);
-
-    // Frames are read in a task of their own, not in a `select!` arm.
-    //
-    // `recv_frame` is two sequential `read_exact` calls, so it is not
-    // cancellation-safe. `select!` drops the losing branch's future, so every
-    // time the user sent a message or the idle timer ticked while a frame was
-    // half-read, the bytes already taken off the socket were lost. The stream
-    // desynchronised, the next length prefix was read out of the middle of a
-    // message, and the session died telling the user their peer had tampered
-    // with it — for a message they had just sent themselves. Padding buckets
-    // start at 256 bytes and the next is 1024, so any message past roughly 230
-    // characters spans several reads and hits this routinely.
-    //
-    // `Receiver::recv` is cancellation-safe, so the race now happens somewhere
-    // losing it costs nothing.
-    let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(8);
-    let reader_task = tauri::async_runtime::spawn(async move {
-        while let Ok(frame) = recv_frame(&mut reader).await {
-            if frame_tx.send(frame).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // Cleared on any traffic, so a warning shown once does not stay on screen
-    // after the conversation resumes.
-    let mut idle_warned = false;
-
-    // Pieces of files still arriving, keyed by transfer. Memory only, and gone
-    // with the session like everything else.
-    let mut incoming_files: std::collections::HashMap<u64, (String, Vec<Vec<u8>>)> =
-        std::collections::HashMap::new();
-    let mut next_transfer_id: u64 = 0;
-
-    let reason = 'session: loop {
-        tokio::select! {
-            // Peer traffic.
-            frame = frame_rx.recv() => {
-                let Some(frame) = frame else {
-                    break 'session ("The other person disconnected.".to_string(), true);
-                };
-                if idle_warned {
-                    idle_warned = false;
-                    emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
-                }
-                match session.handle(&frame) {
-                    Ok(Event::Message(m)) => match wire_format::decode(&m) {
-                        Some(wire_format::Incoming::Text { from, text }) => {
-                            emit(app, UiEvent::Message { from, text })
-                        }
-                        Some(wire_format::Incoming::File {
-                            from, id, index, total, name, data,
-                        }) => {
-                            // Pieces are held until the set is complete. A
-                            // transfer that is abandoned halfway is dropped
-                            // when the session ends, along with everything
-                            // else.
-                            let entry = incoming_files
-                                .entry(id)
-                                .or_insert_with(|| (name.clone(), vec![Vec::new(); total as usize]));
-                            if entry.1.len() == total as usize {
-                                entry.1[index as usize] = data;
-                                let have = entry.1.iter().filter(|c| !c.is_empty()).count() as u32;
-                                emit(app, UiEvent::FileProgress {
-                                    name: name.clone(),
-                                    sent: have,
-                                    total,
-                                    outgoing: false,
-                                });
-                                if have == total {
-                                    let (name, parts) = incoming_files.remove(&id).expect("just seen");
-                                    let bytes: Vec<u8> = parts.concat();
-                                    emit(app, UiEvent::File {
-                                        from,
-                                        name,
-                                        data: B64.encode(&bytes),
+        let reason = 'session: loop {
+            tokio::select! {
+                // Peer traffic.
+                frame = frame_rx.recv() => {
+                    let Some(frame) = frame else {
+                        break 'session ("The other person disconnected.".to_string(), true);
+                    };
+                    if idle_warned {
+                        idle_warned = false;
+                        emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
+                    }
+                    match session.handle(&frame) {
+                        Ok(Event::Message(m)) => match wire_format::decode(&m) {
+                            Some(wire_format::Incoming::Text { from, text }) => {
+                                emit(app, UiEvent::Message { from, text })
+                            }
+                            Some(wire_format::Incoming::File {
+                                from, id, index, total, name, data,
+                            }) => {
+                                // Pieces are held until the set is complete. A
+                                // transfer that is abandoned halfway is dropped
+                                // when the session ends, along with everything
+                                // else.
+                                let entry = incoming_files
+                                    .entry(id)
+                                    .or_insert_with(|| (name.clone(), vec![Vec::new(); total as usize]));
+                                if entry.1.len() == total as usize {
+                                    entry.1[index as usize] = data;
+                                    let have = entry.1.iter().filter(|c| !c.is_empty()).count() as u32;
+                                    emit(app, UiEvent::FileProgress {
+                                        name: name.clone(),
+                                        sent: have,
+                                        total,
+                                        outgoing: false,
                                     });
+                                    if have == total {
+                                        let (name, parts) = incoming_files.remove(&id).expect("just seen");
+                                        let bytes: Vec<u8> = parts.concat();
+                                        emit(app, UiEvent::File {
+                                            from,
+                                            name,
+                                            data: B64.encode(&bytes),
+                                        });
+                                    }
                                 }
                             }
+                            None => break 'session (
+                                "Received a malformed message.".to_string(),
+                                false,
+                            ),
+                        },
+                        Ok(_) => break 'session ("Unexpected handshake frame.".to_string(), false),
+                        // Any protocol error is terminal by design.
+                        Err(ProtoError::Decrypt) | Err(ProtoError::OutOfOrder { .. }) => {
+                            break 'session (
+                                "Message failed verification — session ended for safety."
+                                    .to_string(),
+                                false,
+                            )
                         }
-                        None => break 'session (
-                            "Received a malformed message.".to_string(),
-                            false,
-                        ),
-                    },
-                    Ok(_) => break 'session ("Unexpected handshake frame.".to_string(), false),
-                    // Any protocol error is terminal by design.
-                    Err(ProtoError::Decrypt) | Err(ProtoError::OutOfOrder { .. }) => {
-                        break 'session (
-                            "Message failed verification — session ended for safety."
-                                .to_string(),
-                            false,
-                        )
+                        Err(e) => break 'session (e.to_string(), false),
                     }
-                    Err(e) => break 'session (e.to_string(), false),
                 }
-            }
 
-            // UI commands.
-            cmd = rx.recv() => {
-                match cmd {
-                    Some(Cmd::Send(text)) => {
-                        if idle_warned {
-                            idle_warned = false;
-                            emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
-                        }
-                        match session.encrypt(&wire_format::encode_text(&nickname, &text)) {
-                            Ok(frame) => {
-                                if send_frame(&mut writer, &frame).await.is_err() {
-                                    break 'session ("The other person disconnected.".to_string(), true);
-                                }
+                // UI commands.
+                cmd = rx.recv() => {
+                    match cmd {
+                        Some(Cmd::Send(text)) => {
+                            if idle_warned {
+                                idle_warned = false;
+                                emit(app, UiEvent::IdleWarning { seconds_left: 0, active: false });
                             }
-                            Err(ProtoError::TooLong) => {
-                                emit(
-                                    app,
-                                    UiEvent::Status {
-                                        text: "Message too long.".into(),
-                                        stage: "verify".into(),
-                                    },
-                                );
-                            }
-                            Err(e) => break 'session (e.to_string(), false),
-                        }
-                    }
-                    Some(Cmd::SendFile { name, data }) => {
-                        // Each piece is an ordinary encrypted message, so a
-                        // file gets exactly the protection everything else in
-                        // the room gets, and the transport never learns it is
-                        // carrying a file.
-                        let total = data.len().div_ceil(wire_format::CHUNK).max(1) as u32;
-                        let id = next_transfer_id;
-                        next_transfer_id = next_transfer_id.wrapping_add(1);
-                        let mut failed = false;
-                        for (i, part) in data.chunks(wire_format::CHUNK).enumerate() {
-                            let msg = wire_format::encode_file_chunk(
-                                &nickname, id, i as u32, total, &name, part,
-                            );
-                            match session.encrypt(&msg) {
+                            match session.encrypt(&wire_format::encode_text(&nickname, &text)) {
                                 Ok(frame) => {
                                     if send_frame(&mut writer, &frame).await.is_err() {
+                                        break 'session ("The other person disconnected.".to_string(), true);
+                                    }
+                                }
+                                Err(ProtoError::TooLong) => {
+                                    emit(
+                                        app,
+                                        UiEvent::Status {
+                                            text: "Message too long.".into(),
+                                            stage: "verify".into(),
+                                        },
+                                    );
+                                }
+                                Err(e) => break 'session (e.to_string(), false),
+                            }
+                        }
+                        Some(Cmd::SendFile { name, data }) => {
+                            // Each piece is an ordinary encrypted message, so a
+                            // file gets exactly the protection everything else in
+                            // the room gets, and the transport never learns it is
+                            // carrying a file.
+                            let total = data.len().div_ceil(wire_format::CHUNK).max(1) as u32;
+                            let id = next_transfer_id;
+                            next_transfer_id = next_transfer_id.wrapping_add(1);
+                            let mut failed = false;
+                            for (i, part) in data.chunks(wire_format::CHUNK).enumerate() {
+                                let msg = wire_format::encode_file_chunk(
+                                    &nickname, id, i as u32, total, &name, part,
+                                );
+                                match session.encrypt(&msg) {
+                                    Ok(frame) => {
+                                        if send_frame(&mut writer, &frame).await.is_err() {
+                                            failed = true;
+                                            break;
+                                        }
+                                    }
+                                    Err(_) => {
                                         failed = true;
                                         break;
                                     }
                                 }
-                                Err(_) => {
-                                    failed = true;
-                                    break;
-                                }
+                                emit(app, UiEvent::FileProgress {
+                                    name: name.clone(),
+                                    sent: i as u32 + 1,
+                                    total,
+                                    outgoing: true,
+                                });
                             }
-                            emit(app, UiEvent::FileProgress {
-                                name: name.clone(),
-                                sent: i as u32 + 1,
-                                total,
-                                outgoing: true,
-                            });
+                            if failed {
+                                break 'session ("The other person disconnected.".to_string(), true);
+                            }
                         }
-                        if failed {
-                            break 'session ("The other person disconnected.".to_string(), true);
-                        }
+                        Some(Cmd::End) => break 'session ("You ended the session.".to_string(), false),
+                        None => break 'session ("Session closed.".to_string(), false),
                     }
-                    Some(Cmd::End) => break 'session ("You ended the session.".to_string(), false),
-                    None => break 'session ("Session closed.".to_string(), false),
+                }
+
+                // Idle reaper, in two stages. The first pass warns and the second
+                // ends it, so silence never closes a chat without notice. Any
+                // traffic resets both, because the whole select! restarts.
+                _ = tokio::time::sleep(idle.saturating_sub(IDLE_WARNING)) , if !idle_warned => {
+                    idle_warned = true;
+                    emit(app, UiEvent::IdleWarning {
+                        seconds_left: IDLE_WARNING.as_secs() as u32,
+                        active: true,
+                    });
+                }
+                _ = tokio::time::sleep(idle) => {
+                    break 'session (
+                        format!(
+                            "Session ended after {} minutes of silence.",
+                            idle.as_secs() / 60
+                        ),
+                        false,
+                    );
                 }
             }
+        };
 
-            // Idle reaper, in two stages. The first pass warns and the second
-            // ends it, so silence never closes a chat without notice. Any
-            // traffic resets both, because the whole select! restarts.
-            _ = tokio::time::sleep(idle.saturating_sub(IDLE_WARNING)) , if !idle_warned => {
-                idle_warned = true;
-                emit(app, UiEvent::IdleWarning {
-                    seconds_left: IDLE_WARNING.as_secs() as u32,
-                    active: true,
-                });
-            }
-            _ = tokio::time::sleep(idle) => {
-                break 'session (
-                    format!(
-                        "Session ended after {} minutes of silence.",
-                        idle.as_secs() / 60
-                    ),
-                    false,
-                );
-            }
+        // The reader is parked in `read_exact` and would outlive the session,
+        // holding the read half of the connection open, until the peer happened to
+        // disconnect.
+        reader_task.abort();
+
+        let (why, worth_retrying) = reason;
+        if !worth_retrying {
+            break 'connection why;
         }
-    };
-
-    // The reader is parked in `read_exact` and would outlive the session,
-    // holding the read half of the connection open, until the peer happened to
-    // disconnect.
-    reader_task.abort();
-
-    let (why, worth_retrying) = reason;
-    if !worth_retrying {
-        break 'connection why;
-    }
-    reconnects += 1;
-    if reconnects > MAX_RECONNECTS {
-        break 'connection why;
-    }
-    emit(app, UiEvent::Reconnecting);
-    // `session` drops here; Drop zeroizes every key. The next pass derives
-    // fresh ones from the secrets we still hold.
+        reconnects += 1;
+        if reconnects > MAX_RECONNECTS {
+            break 'connection why;
+        }
+        emit(app, UiEvent::Reconnecting);
+        // `session` drops here; Drop zeroizes every key. The next pass derives
+        // fresh ones from the secrets we still hold.
     };
 
     reason
@@ -792,63 +801,4 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Narco");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{decode_message, encode_message};
-
-    #[test]
-    fn a_name_and_text_survive_a_round_trip() {
-        let raw = encode_message("alice", "hello there");
-        assert_eq!(
-            decode_message(&raw),
-            Some(("alice".to_string(), "hello there".to_string()))
-        );
-    }
-
-    #[test]
-    fn no_name_is_allowed() {
-        let raw = encode_message("", "anonymous");
-        assert_eq!(
-            decode_message(&raw),
-            Some((String::new(), "anonymous".to_string()))
-        );
-    }
-
-    /// A name cannot smuggle a separator and pretend the rest is the message,
-    /// nor claim to be someone else by embedding a second field.
-    #[test]
-    fn a_name_cannot_forge_the_separator() {
-        let raw = encode_message("alice\0bob", "hi");
-        let (from, text) = decode_message(&raw).unwrap();
-        assert_eq!(from, "alicebob");
-        assert_eq!(text, "hi");
-    }
-
-    /// The message keeps every byte it was given, separators included, because
-    /// only the first NUL divides the two fields.
-    #[test]
-    fn text_may_contain_anything() {
-        let body = "line\0with a nul and \u{1f600} and \n newline";
-        let raw = encode_message("bob", body);
-        let (from, text) = decode_message(&raw).unwrap();
-        assert_eq!(from, "bob");
-        assert_eq!(text, body);
-    }
-
-    /// A peer on an older build sends bare text with no separator at all; it
-    /// should still be readable rather than rejected.
-    #[test]
-    fn a_message_without_a_name_field_still_reads() {
-        assert_eq!(
-            decode_message(b"just text"),
-            Some((String::new(), "just text".to_string()))
-        );
-    }
-
-    #[test]
-    fn invalid_utf8_is_refused_rather_than_mangled() {
-        assert_eq!(decode_message(&[0xff, 0xfe, 0x00, b'h']), None);
-    }
 }
