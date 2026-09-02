@@ -143,28 +143,35 @@ pub fn find_tor_binary() -> Result<PathBuf, DaemonError> {
             roots.push(dir.join("tor"));
         }
     }
+    // Where the app itself might have put it — worth naming in an error.
+    let own = roots.len();
     if let Ok(path) = std::env::var("PATH") {
         roots.extend(std::env::split_paths(&path));
     }
 
-    for root in roots {
+    for (i, root) in roots.iter().enumerate() {
         let candidate = root.join(name);
         if candidate.is_file() {
             tracing::info!("using tor at {}", candidate.display());
             return Ok(candidate);
         }
-        if !tried.contains(&candidate) {
+        if i < own && !tried.contains(&candidate) {
             tried.push(candidate);
         }
     }
 
+    // Deliberately does not list the PATH entries it also tried. Users paste
+    // these logs in public, and a full PATH is a list of everything installed
+    // on the machine — for a privacy tool, that is a worse leak than the
+    // failure is worth diagnosing.
     Err(DaemonError::NotFound(format!(
-        "{name}; looked in: {}",
+        "{name}; looked in {} and {} directories on PATH",
         tried
             .iter()
             .map(|p| p.display().to_string())
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", "),
+        roots.len() - own
     )))
 }
 
@@ -408,9 +415,13 @@ impl TorDaemon {
                 return Ok(format!("{id}.onion"));
             }
         }
-        Err(DaemonError::Control(format!(
-            "ADD_ONION gave no ServiceID: {reply}"
-        )))
+        // The reply is deliberately not quoted: on the success it failed to
+        // parse it contains the ServiceID, which is the room's .onion address,
+        // and this error is shown on screen and written to a log people paste
+        // in public.
+        Err(DaemonError::Control(
+            "tor accepted the onion service but reported no address for it".into(),
+        ))
     }
 
     /// Stop publishing a service. Used to close the door once two peers are in.

@@ -67,6 +67,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.3.1",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -370,6 +371,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.3.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -382,6 +384,7 @@ dependencies = [
  "chacha20",
  "cipher",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -2167,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "narco-app"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "futures",
  "narco-proto",
@@ -2202,7 +2205,6 @@ dependencies = [
  "base64 0.23.1",
  "data-encoding",
  "ed25519-dalek",
- "futures",
  "getrandom 0.3.4",
  "narco-proto",
  "sha2 0.11.0",

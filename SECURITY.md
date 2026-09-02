@@ -46,6 +46,43 @@ is the honest recommendation.
   itself can be blocked. Narco fails closed — it will not connect rather than
   connect insecurely.
 
+## Known weaknesses
+
+Found in an internal review in 0.5.6 and listed here because a security tool
+that keeps its open problems to itself is not worth trusting. Ordered by how
+much they should worry you.
+
+1. **The SPAKE2 library never erases its own state.** `spake2` 0.4.0 has no
+   zeroization — not even as an optional feature. Its ephemeral scalar and a
+   plain copy of the PAKE password are freed un-wiped when the handshake
+   finishes, and they stay in the heap for the whole conversation. Anyone who
+   can read this process's memory (a core dump, a hibernation image, a seized
+   and unlocked device) can recompute the session key from that scalar plus the
+   handshake messages, which are public. The password copy does not reveal your
+   code — HKDF is one way — but it is enough to impersonate either side in any
+   future session using the same secrets. Fixing this needs a patched or
+   replaced PAKE crate; nothing in Narco's own code can reach that memory.
+
+2. **Tor's cache is left on disk, deliberately.** No message, key, or code ever
+   is — but tor keeps its consensus cache and chosen entry guards in a folder
+   Narco owns, which is what makes a second connection fast instead of taking
+   another 40 seconds. It contains nothing of yours, and it is deleted when the
+   daemon shuts down cleanly, but timestamps in it are evidence that this
+   machine ran Narco and roughly when. If that matters to you, delete
+   `~/.cache/narco` (or `%LOCALAPPDATA%\narco`) afterwards.
+
+3. **The room code is held in ordinary strings.** `code::generate`,
+   `code::normalize`, and the secret list in the app all use `String`, which is
+   not wiped when dropped. The derived key material *is* wiped. Recovering the
+   code from memory is worse than recovering a key, because it reproduces every
+   past and future session for that code.
+
+4. **A host will answer guesses as fast as they arrive.** SPAKE2 grants one
+   password guess per connection, which is the intended bound — but nothing
+   rate-limits connections, so someone who already knows the onion address gets
+   unlimited attempts for as long as the host waits. Generated codes make this
+   irrelevant; invented ones do not.
+
 ## Design decisions worth reviewing
 
 Places where a reviewer should look hardest:

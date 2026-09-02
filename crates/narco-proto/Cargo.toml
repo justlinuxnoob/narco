@@ -13,12 +13,19 @@ repository = "https://github.com/justlinuxnoob/narco"
 spake2 = "0.4"
 
 # Code stretching and key derivation.
-argon2 = "0.6"
+# Same story: without this, the BLAKE2b initial hash over the room-code
+# material stays in memory after derivation.
+argon2 = { version = "0.6", features = ["zeroize"] }
 hkdf = "0.13"
 sha2 = "0.11"
 
 # Authenticated encryption.
-chacha20poly1305 = "0.11"
+# The `zeroize` feature is NOT on by default. Without it the per-message key
+# copied into the cipher object is dropped un-wiped, leaving one copy of every
+# message key in freed heap — which quietly falsifies the forward-secrecy claim
+# in PROTOCOL.md §5.3, since a memory capture at message n then recovers keys
+# 0..n-1.
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 
 # Constant-time comparison for key confirmation.
 subtle = "2.6"

@@ -60,8 +60,9 @@
             </select>
           </label>
           <p class="hint">
-            Nothing is ever written to disk. These only change how long things
-            stay in memory and on screen.
+            No message, key or code is ever written to disk. These only change
+            how long things stay in memory and on screen. Tor keeps its own
+            network cache in a folder Narco owns, which holds nothing of yours.
           </p>
         </details>
 
@@ -81,8 +82,10 @@
       <details id="diag">
         <summary>diagnostics</summary>
         <p class="hint">
-          What the app and Tor actually did. Contains no code, address, key or
-          message — safe to share when reporting a problem.
+          What the app and Tor actually did. It holds no code, address, key or
+          message — but it does contain file paths from this computer, which
+          usually include your username. Worth a glance before posting it
+          somewhere public.
         </p>
         <div class="row">
           <button id="diag-refresh" class="ghost small" type="button">refresh</button>
@@ -159,8 +162,8 @@
       <h1>gone</h1>
       <p class="status" id="ended-reason"></p>
       <p class="hint">
-        The keys were destroyed and the messages are gone. Nothing was written
-        to disk and nothing was stored anywhere.
+        The keys were destroyed and the messages are gone. Nothing you said,
+        and no code or key, was ever written to disk.
       </p>
       <div class="row">
         <button id="again" type="button">start over</button>

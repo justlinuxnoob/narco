@@ -10,6 +10,7 @@
 use base64::Engine as _;
 use narco_proto::kdf::Derived;
 use sha2::{Digest, Sha512};
+use zeroize::Zeroizing;
 
 /// `.onion` version byte for v3 addresses (rend-spec-v3 §6).
 const ONION_VERSION: u8 = 0x03;
@@ -24,7 +25,12 @@ pub struct OnionKey {
     /// Expanded ed25519 secret key (scalar ‖ hash prefix), base64.
     ///
     /// This is exactly the blob Tor's `ADD_ONION ED25519-V3:` expects.
-    pub control_blob: String,
+    ///
+    /// Wrapped so it is wiped when the key goes out of scope. It was the last
+    /// secret in the codebase left in a plain `String`, which meant the private
+    /// key the whole room is built on stayed in freed heap — and in swap — for
+    /// the life of the process, while everything around it was zeroized.
+    pub control_blob: Zeroizing<String>,
 }
 
 impl core::fmt::Debug for OnionKey {
@@ -41,8 +47,8 @@ impl core::fmt::Debug for OnionKey {
 /// This is the standard expansion: SHA-512 of the seed with the usual clamping
 /// of the low half. Tor stores onion service keys in this expanded form, which
 /// is why `ADD_ONION` wants 64 bytes rather than the 32-byte seed.
-fn expand_secret(seed: &[u8; 32]) -> [u8; 64] {
-    let mut out = [0u8; 64];
+fn expand_secret(seed: &[u8; 32]) -> Zeroizing<[u8; 64]> {
+    let mut out = Zeroizing::new([0u8; 64]);
     out.copy_from_slice(&Sha512::digest(seed));
     out[0] &= 248;
     out[31] &= 127;
@@ -78,7 +84,9 @@ pub fn onion_key(derived: &Derived) -> OnionKey {
 
     OnionKey {
         address: onion_address(&pubkey),
-        control_blob: base64::engine::general_purpose::STANDARD.encode(expand_secret(seed)),
+        control_blob: Zeroizing::new(
+            base64::engine::general_purpose::STANDARD.encode(expand_secret(seed).as_ref()),
+        ),
     }
 }
 
@@ -133,6 +141,6 @@ mod tests {
         let k = onion_key(&kdf::derive("PWXK7M2QRT9HFZ").unwrap());
         let s = format!("{k:?}");
         assert!(!s.contains(k.address.trim_end_matches(".onion")));
-        assert!(!s.contains(&k.control_blob));
+        assert!(!s.contains(k.control_blob.as_str()));
     }
 }

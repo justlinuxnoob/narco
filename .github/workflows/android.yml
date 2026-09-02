@@ -98,7 +98,7 @@ jobs:
             echo "fetching $ABI from $url"
             curl -fsSL --retry 3 -o "teb-${ABI}.tar.gz" "$url"
             mkdir -p "$JNI/$ABI"
-            tar xzf "teb-${ABI}.tar.gz" -C "$JNI/$ABI" --strip-components=2 tor/libTor.so
+            tar xzf "teb-${ABI}.tar.gz" -C "$JNI/$ABI" --strip-components=1 tor/libTor.so
             test -f "$JNI/$ABI/libTor.so"
           done
           find "$JNI" -name 'libTor.so' -printf '%p %s bytes\n'

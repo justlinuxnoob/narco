@@ -343,8 +343,12 @@ function setStartReady(ready: boolean) {
 }
 
 $("cancel").addEventListener("click", async () => {
+  // Say what is happening, then let the backend confirm it with an "ended"
+  // event. Declaring it cancelled here was a lie: the session kept running,
+  // kept the onion service published, and could still drop the user into a
+  // chat they thought they had killed.
+  $("status").textContent = "Cancelling…";
   await invoke("end_session");
-  endWith("You cancelled.");
 });
 
 // --- chat -----------------------------------------------------------------
@@ -399,6 +403,11 @@ function endWith(reason: string) {
   // zeroized the keys.
   messages.replaceChildren();
   input.value = "";
+  // The share box holds the host's secrets in full. It was never cleared, so
+  // they stayed in the DOM for the life of the app — visible again the moment
+  // anyone hit "start over".
+  $("share-code").textContent = "";
+  $("share").hidden = true;
   $("ended-reason").textContent = reason;
   show("ended");
 }

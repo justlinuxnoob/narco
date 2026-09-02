@@ -262,6 +262,9 @@ async fn connect(
     let derived = narco_proto::derive_multi(&secrets).map_err(|e| e.to_string())?;
 
     let (tx, rx) = mpsc::channel::<Cmd>(16);
+    // Kept so the cleanup below can tell whether the slot still holds *this*
+    // session's sender.
+    let mine = tx.clone();
     {
         let mut slot = state.tx.lock().expect("state poisoned");
         if slot.is_some() {
@@ -285,8 +288,18 @@ async fn connect(
                 .to_string(),
         };
         // Whatever happened, the session is over and holds nothing.
+        //
+        // Only clear the slot if it still belongs to us. `end_session` takes
+        // the sender out on its way, so a later `connect` can be admitted and
+        // install its own before this task finishes — and clearing
+        // unconditionally then cut the *new* session's channel, leaving it
+        // running with a live peer and a published onion service that nothing
+        // could stop.
         if let Some(state) = app.try_state::<AppState>() {
-            *state.tx.lock().expect("state poisoned") = None;
+            let mut slot = state.tx.lock().expect("state poisoned");
+            if slot.as_ref().is_some_and(|s| s.same_channel(&mine)) {
+                *slot = None;
+            }
         }
         emit(&app, UiEvent::Ended { reason });
     });
@@ -324,10 +337,30 @@ async fn run_session(
     // The starter hosts the onion service; the joiner only dials it. One side
     // publishing and the other dialling is what makes a device never connect to
     // itself.
-    let connected = if host {
-        transport.host(&derived, cb).await
-    } else {
-        transport.join(&derived, cb).await
+    // Cancel has to work *here*, not just once the chat is up. Finding the
+    // other person is where a user actually gives up, and the End command used
+    // to sit unread in the channel until the 30-minute meet timeout: the onion
+    // service stayed published, the session stayed alive, and if a peer turned
+    // up in the meantime the UI jumped into a chat the user thought they had
+    // killed. Meanwhile the front end had already claimed "You cancelled."
+    let connected = tokio::select! {
+        result = async {
+            if host {
+                transport.host(&derived, cb).await
+            } else {
+                transport.join(&derived, cb).await
+            }
+        } => result,
+
+        // `Receiver::recv` is cancellation-safe, so losing this race costs
+        // nothing; anything that is not End would have been ignored anyway.
+        _ = async {
+            while let Some(cmd) = rx.recv().await {
+                if matches!(cmd, Cmd::End) {
+                    break;
+                }
+            }
+        } => return "You cancelled.".into(),
     };
 
     let Connected {
@@ -342,24 +375,48 @@ async fn run_session(
 
     let (mut reader, mut writer) = tokio::io::split(stream);
 
-    loop {
+    // Frames are read in a task of their own, not in a `select!` arm.
+    //
+    // `recv_frame` is two sequential `read_exact` calls, so it is not
+    // cancellation-safe. `select!` drops the losing branch's future, so every
+    // time the user sent a message or the idle timer ticked while a frame was
+    // half-read, the bytes already taken off the socket were lost. The stream
+    // desynchronised, the next length prefix was read out of the middle of a
+    // message, and the session died telling the user their peer had tampered
+    // with it — for a message they had just sent themselves. Padding buckets
+    // start at 256 bytes and the next is 1024, so any message past roughly 230
+    // characters spans several reads and hits this routinely.
+    //
+    // `Receiver::recv` is cancellation-safe, so the race now happens somewhere
+    // losing it costs nothing.
+    let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(8);
+    let reader_task = tauri::async_runtime::spawn(async move {
+        while let Ok(frame) = recv_frame(&mut reader).await {
+            if frame_tx.send(frame).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let reason = 'session: loop {
         tokio::select! {
             // Peer traffic.
-            frame = recv_frame(&mut reader) => {
-                let Ok(frame) = frame else {
-                    return "The other person disconnected.".into();
+            frame = frame_rx.recv() => {
+                let Some(frame) = frame else {
+                    break 'session "The other person disconnected.".into();
                 };
                 match session.handle(&frame) {
                     Ok(Event::Message(m)) => match String::from_utf8(m) {
                         Ok(text) => emit(app, UiEvent::Message { text }),
-                        Err(_) => return "Received a malformed message.".into(),
+                        Err(_) => break 'session "Received a malformed message.".into(),
                     },
-                    Ok(_) => return "Unexpected handshake frame.".into(),
+                    Ok(_) => break 'session "Unexpected handshake frame.".into(),
                     // Any protocol error is terminal by design.
                     Err(ProtoError::Decrypt) | Err(ProtoError::OutOfOrder { .. }) => {
-                        return "Message failed verification — session ended for safety.".into()
+                        break 'session
+                            "Message failed verification — session ended for safety.".into()
                     }
-                    Err(e) => return e.to_string(),
+                    Err(e) => break 'session e.to_string(),
                 }
             }
 
@@ -370,7 +427,7 @@ async fn run_session(
                         match session.encrypt(text.as_bytes()) {
                             Ok(frame) => {
                                 if send_frame(&mut writer, &frame).await.is_err() {
-                                    return "The other person disconnected.".into();
+                                    break 'session "The other person disconnected.".into();
                                 }
                             }
                             Err(ProtoError::TooLong) => {
@@ -382,23 +439,29 @@ async fn run_session(
                                     },
                                 );
                             }
-                            Err(e) => return e.to_string(),
+                            Err(e) => break 'session e.to_string(),
                         }
                     }
-                    Some(Cmd::End) => return "You ended the session.".into(),
-                    None => return "Session closed.".into(),
+                    Some(Cmd::End) => break 'session "You ended the session.".into(),
+                    None => break 'session "Session closed.".into(),
                 }
             }
 
             // Idle reaper.
             _ = tokio::time::sleep(idle) => {
-                return format!(
+                break 'session format!(
                     "Session ended after {} minutes of silence.",
                     idle.as_secs() / 60
                 );
             }
         }
-    }
+    };
+
+    // The reader is parked in `read_exact` and would outlive the session,
+    // holding the read half of the connection open, until the peer happened to
+    // disconnect.
+    reader_task.abort();
+    reason
     // `session` drops here; Drop zeroizes every key.
 }
 
