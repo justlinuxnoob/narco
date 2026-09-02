@@ -98,6 +98,22 @@ jobs:
           test -d "$dev" && test -d "$sim"
           echo "TOR_XCF_DEVICE=$dev" >> "$GITHUB_ENV"
           echo "TOR_XCF_SIM=$sim" >> "$GITHUB_ENV"
+          # Informational, never a gate. Two attempts at gating on this both
+          # rejected a framework that was fine: once on nm's flags, and once
+          # because `grep -q` closes the pipe on its first match, `strings`
+          # dies of SIGPIPE, and `pipefail` reports the whole pipeline failed —
+          # so finding the symbol is what made the check say it was missing.
+          # Linking is the real test and says "undefined symbol: _tor_run_main"
+          # plainly enough.
+          lib="$(find "$dev" -type f -name tor | head -1)"
+          echo "device library: ${lib:-none found}"
+          if [ -n "$lib" ]; then
+            found=$(strings -a "$lib" 2>/dev/null | grep -cx "tor_run_main" || true)
+            echo "tor_run_main occurrences: ${found:-0}"
+          fi
+
+          echo "TOR_XCF_DEVICE=$dev" >> "$GITHUB_ENV"
+          echo "TOR_XCF_SIM=$sim" >> "$GITHUB_ENV"
           # tor_run_main is what src/embedded.rs calls; if it is not exported
           # the link fails much later with far less to go on. Located rather
           # than assumed: the binary sits under Versions/A in these slices, and
